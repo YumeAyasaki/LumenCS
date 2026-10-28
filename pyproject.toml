@@ -1,0 +1,9 @@
+[project]
+name = "lumen-home-assistant"
+version = "0.1.0"
+description = "Lumen Home customer-support assistant"
+requires-python = ">=3.11"
+dependencies = [
+    "openpyxl>=3.1,<4",
+    "pydantic>=2.7,<3",
+]

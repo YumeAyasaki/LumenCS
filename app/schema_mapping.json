@@ -1,0 +1,52 @@
+{
+  "files": {
+    "product_catalog*.xlsx": {
+      "sheets": {
+        "Danh mục SP": {
+          "header_rows": [4, 5],
+          "data_start_row": 6
+        },
+        "Bảng giá": {
+          "header_rows": [4, 5],
+          "data_start_row": 6
+        },
+        "Khuyến mãi": {
+          "header_rows": [4],
+          "data_start_row": 5
+        },
+        "Bảo hành": {
+          "header_rows": [4, 5],
+          "data_start_row": 6
+        },
+        "Vùng giá": {
+          "header_rows": [3],
+          "data_start_row": 4
+        },
+        "Giá 2025 (lưu trữ)": {
+          "header_rows": [3, 4],
+          "data_start_row": 5
+        }
+      }
+    },
+    "service_network*.xlsx": {
+      "sheets": {
+        "Trung tâm dịch vụ": {
+          "header_rows": [4, 5],
+          "data_start_row": 6
+        },
+        "Biểu phí dịch vụ": {
+          "header_rows": [4, 5],
+          "data_start_row": 6
+        }
+      }
+    },
+    "sample_qa*.xlsx": {
+      "sheets": {
+        "QA": {
+          "header_rows": [4],
+          "data_start_row": 5
+        }
+      }
+    }
+  }
+}

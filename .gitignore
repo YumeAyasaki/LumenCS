@@ -1,1 +1,7 @@
+# Local stuff
 .github
+NOTE.md
+data/*
+
+# Python things
+__pycache__/
