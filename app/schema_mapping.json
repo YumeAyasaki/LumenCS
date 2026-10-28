@@ -8,7 +8,8 @@
         },
         "Bảng giá": {
           "header_rows": [4, 5],
-          "data_start_row": 6
+          "data_start_row": 6,
+          "footnote_start_row": 23
         },
         "Khuyến mãi": {
           "header_rows": [4],
@@ -16,11 +17,13 @@
         },
         "Bảo hành": {
           "header_rows": [4, 5],
-          "data_start_row": 6
+          "data_start_row": 6,
+          "footnote_start_row": 11
         },
         "Vùng giá": {
           "header_rows": [3],
-          "data_start_row": 4
+          "data_start_row": 4,
+          "footnote_start_row": 14
         },
         "Giá 2025 (lưu trữ)": {
           "header_rows": [3, 4],

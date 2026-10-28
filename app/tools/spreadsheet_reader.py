@@ -11,6 +11,7 @@ from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import ValidationError
 
 DEFAULT_MAPPING_PATH: Path = Path(__file__).parents[1] / "schema_mapping.json"
 ExcelValue: TypeAlias = str | int | float | bool | None
@@ -22,6 +23,8 @@ class SheetMapping(BaseModel):
     Attributes:
         header_rows: Excel row numbers that form the worksheet column labels.
         data_start_row: First Excel row that may contain source records.
+        footnote_start_row: Optional first row containing footnotes rather than
+            table records.
 
     Raises:
         ValueError: If data starts before or on a configured header row.
@@ -31,6 +34,7 @@ class SheetMapping(BaseModel):
 
     header_rows: tuple[int, ...] = Field(min_length=1)
     data_start_row: int = Field(ge=1)
+    footnote_start_row: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def validate_row_order(self) -> SheetMapping:
@@ -46,6 +50,11 @@ class SheetMapping(BaseModel):
             raise ValueError("header_rows must contain positive Excel row numbers")
         if self.data_start_row <= max(self.header_rows):
             raise ValueError("data_start_row must follow every configured header row")
+        if (
+            self.footnote_start_row is not None
+            and self.footnote_start_row <= self.data_start_row
+        ):
+            raise ValueError("footnote_start_row must follow data_start_row")
         return self
 
 
@@ -72,13 +81,24 @@ class SpreadsheetRow(BaseModel):
     values: dict[str, ExcelValue]
 
 
+class SpreadsheetNote(BaseModel):
+    """Represent a non-tabular worksheet note and its original row number."""
+
+    source_row: int = Field(ge=1)
+    values: dict[str, ExcelValue]
+
+
 class SpreadsheetSheet(BaseModel):
-    """Represent one worksheet as columns and provenance-bearing rows."""
+    """Represent worksheet data, notes, visibility, and any read warnings."""
 
     name: str
     ordinal: int = Field(ge=1)
+    is_hidden: bool
     columns: list[str]
     rows: list[SpreadsheetRow]
+    header_notes: list[SpreadsheetNote] = Field(default_factory=list)
+    footnotes: list[SpreadsheetNote] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class SpreadsheetWorkbook(BaseModel):
@@ -86,6 +106,7 @@ class SpreadsheetWorkbook(BaseModel):
 
     source_file: str
     sheets: list[SpreadsheetSheet]
+    warnings: list[str] = Field(default_factory=list)
 
 
 def load_schema_mapping(mapping_path: Path = DEFAULT_MAPPING_PATH) -> SchemaMapping:
@@ -99,7 +120,7 @@ def load_schema_mapping(mapping_path: Path = DEFAULT_MAPPING_PATH) -> SchemaMapp
 
     Raises:
         OSError: If the mapping file cannot be read.
-        ValueError: If its JSON does not match the mapping model.
+        ValidationError: If its JSON does not match the mapping model.
     """
     return SchemaMapping.model_validate_json(mapping_path.read_bytes())
 
@@ -208,18 +229,101 @@ def _excel_value(value: object, source: str) -> ExcelValue:
     raise TypeError(f"Unsupported Excel value at {source}: {type(value).__name__}")
 
 
+def _note_rows(
+    worksheet: Worksheet,
+    start_row: int,
+    end_row: int,
+    source: str,
+) -> list[SpreadsheetNote]:
+    """Collect non-empty raw worksheet rows outside of the data table.
+
+    Args:
+        worksheet: Worksheet containing notes.
+        start_row: First inclusive row to inspect.
+        end_row: Last inclusive row to inspect.
+        source: Workbook and worksheet label for actionable errors.
+
+    Returns:
+        Non-empty note rows keyed by their Excel column letters.
+
+    Raises:
+        TypeError: If a note cell contains an unsupported Python value.
+    """
+    notes: list[SpreadsheetNote] = []
+    for row_number in range(start_row, end_row + 1):
+        values: dict[str, ExcelValue] = {
+            get_column_letter(column_number): _excel_value(
+                worksheet.cell(row_number, column_number).value,
+                f"{source}!{get_column_letter(column_number)}{row_number}",
+            )
+            for column_number in range(1, worksheet.max_column + 1)
+            if worksheet.cell(row_number, column_number).value is not None
+        }
+        if values:
+            notes.append(SpreadsheetNote(source_row=row_number, values=values))
+    return notes
+
+
+def _read_unmapped_sheet(
+    worksheet: Worksheet,
+    sheet_ordinal: int,
+    workbook_name: str,
+    warning: str,
+) -> SpreadsheetSheet:
+    """Preserve all populated cells when a worksheet mapping is unavailable.
+
+    Args:
+        worksheet: Worksheet to read without a trusted schema.
+        sheet_ordinal: One-based position in the workbook.
+        workbook_name: Workbook filename used in warning context.
+        warning: Explanation of why the fallback was needed.
+
+    Returns:
+        An unstructured sheet whose non-empty rows are retained as data.
+
+    Raises:
+        TypeError: If a cell contains an unsupported Python value.
+    """
+    columns: list[str] = [
+        get_column_letter(column_number)
+        for column_number in range(1, worksheet.max_column + 1)
+    ]
+    rows: list[SpreadsheetRow] = []
+    for row_number in range(1, worksheet.max_row + 1):
+        values: dict[str, ExcelValue] = {
+            column: _excel_value(
+                worksheet.cell(row_number, column_number).value,
+                f"{workbook_name}:{worksheet.title}!{column}{row_number}",
+            )
+            for column_number, column in enumerate(columns, start=1)
+        }
+        if any(value is not None for value in values.values()):
+            rows.append(SpreadsheetRow(source_row=row_number, values=values))
+    return SpreadsheetSheet(
+        name=worksheet.title,
+        ordinal=sheet_ordinal,
+        is_hidden=worksheet.sheet_state != "visible",
+        columns=columns,
+        rows=rows,
+        warnings=[warning],
+    )
+
+
 def read_workbook(
     workbook_path: Path,
-    workbook_mapping: WorkbookMapping,
+    workbook_mapping: WorkbookMapping | None,
     source_file: str | None = None,
+    warnings: list[str] | None = None,
 ) -> SpreadsheetWorkbook:
     """Read a workbook into structured data without writing to a database.
 
     Args:
         workbook_path: Path to the source ``.xlsx`` workbook.
-        workbook_mapping: Layout definitions for each workbook worksheet.
+        workbook_mapping: Layout definitions for each worksheet, or ``None`` to
+            read worksheets as unstructured rows.
         source_file: Optional source label, such as a path relative to the data
             directory. Defaults to the workbook filename.
+        warnings: Optional warnings about the workbook or its schema mapping.
 
     Returns:
         The workbook's worksheets, cell values, and original row provenance.
@@ -228,26 +332,66 @@ def read_workbook(
         KeyError: If a workbook worksheet has no configured mapping.
         OSError: If the workbook cannot be opened.
         TypeError: If an Excel cell contains an unsupported value.
-        ValueError: If a configured header lies outside a worksheet.
     """
     workbook = load_workbook(workbook_path, read_only=False, data_only=True)
     parsed_sheets: list[SpreadsheetSheet] = []
+    workbook_warnings: list[str] = list(warnings or [])
     try:
         for sheet_ordinal, worksheet in enumerate(workbook.worksheets, start=1):
-            if worksheet.title not in workbook_mapping.sheets:
-                raise KeyError(
-                    f"No schema mapping for worksheet {worksheet.title!r} "
-                    f"in {workbook_path.name!r}"
+            mapping: SheetMapping | None = (
+                workbook_mapping.sheets.get(worksheet.title)
+                if workbook_mapping is not None
+                else None
+            )
+            if mapping is None:
+                warning: str = (
+                    f"No valid schema mapping for worksheet {worksheet.title!r}; "
+                    "read all populated rows without separating table data and notes."
                 )
-            mapping: SheetMapping = workbook_mapping.sheets[worksheet.title]
-            if max(mapping.header_rows) > worksheet.max_row:
-                raise ValueError(
-                    f"Header rows {mapping.header_rows} exceed worksheet "
-                    f"{worksheet.title!r} in {workbook_path.name!r}"
+                workbook_warnings.append(f"{workbook_path.name}: {warning}")
+                parsed_sheets.append(
+                    _read_unmapped_sheet(
+                        worksheet,
+                        sheet_ordinal,
+                        workbook_path.name,
+                        warning,
+                    )
                 )
+                continue
+            if (
+                max(mapping.header_rows) > worksheet.max_row
+                or mapping.data_start_row > worksheet.max_row + 1
+                or (
+                    mapping.footnote_start_row is not None
+                    and mapping.footnote_start_row > worksheet.max_row + 1
+                )
+            ):
+                warning = (
+                    f"Schema row positions are outside worksheet "
+                    f"{worksheet.title!r}; read all populated rows without "
+                    "separating table data and notes."
+                )
+                workbook_warnings.append(f"{workbook_path.name}: {warning}")
+                parsed_sheets.append(
+                    _read_unmapped_sheet(
+                        worksheet,
+                        sheet_ordinal,
+                        workbook_path.name,
+                        warning,
+                    )
+                )
+                continue
             columns: list[str] = _column_names(worksheet, mapping)
+            table_end_row: int = (
+                mapping.footnote_start_row - 1
+                if mapping.footnote_start_row is not None
+                else worksheet.max_row
+            )
             rows: list[SpreadsheetRow] = []
-            for row_number in range(mapping.data_start_row, worksheet.max_row + 1):
+            for row_number in range(
+                mapping.data_start_row,
+                table_end_row + 1,
+            ):
                 values: dict[str, ExcelValue] = {
                     column: _excel_value(
                         worksheet.cell(row_number, column_number).value,
@@ -257,12 +401,32 @@ def read_workbook(
                 }
                 if any(value is not None for value in values.values()):
                     rows.append(SpreadsheetRow(source_row=row_number, values=values))
+            first_header_row: int = min(mapping.header_rows)
+            header_notes: list[SpreadsheetNote] = _note_rows(
+                worksheet,
+                1,
+                first_header_row - 1,
+                f"{workbook_path.name}:{worksheet.title}",
+            )
+            footnotes: list[SpreadsheetNote] = (
+                _note_rows(
+                    worksheet,
+                    mapping.footnote_start_row,
+                    worksheet.max_row,
+                    f"{workbook_path.name}:{worksheet.title}",
+                )
+                if mapping.footnote_start_row is not None
+                else []
+            )
             parsed_sheets.append(
                 SpreadsheetSheet(
                     name=worksheet.title,
                     ordinal=sheet_ordinal,
+                    is_hidden=worksheet.sheet_state != "visible",
                     columns=columns,
                     rows=rows,
+                    header_notes=header_notes,
+                    footnotes=footnotes,
                 )
             )
     finally:
@@ -270,6 +434,7 @@ def read_workbook(
     return SpreadsheetWorkbook(
         source_file=source_file or workbook_path.name,
         sheets=parsed_sheets,
+        warnings=workbook_warnings,
     )
 
 
@@ -288,14 +453,20 @@ def read_spreadsheet_directory(
 
     Raises:
         FileNotFoundError: If the directory is missing or contains no workbooks.
-        OSError: If the mapping or a workbook cannot be read.
-        KeyError: If a workbook worksheet has no configured mapping.
+        OSError: If a workbook cannot be read.
         TypeError: If an Excel cell contains an unsupported value.
-        ValueError: If a workbook mapping is missing or ambiguous.
     """
     if not data_dir.is_dir():
         raise FileNotFoundError(f"Data directory does not exist: {data_dir}")
-    schema_mapping: SchemaMapping = load_schema_mapping(mapping_path)
+    mapping_warnings: list[str] = []
+    try:
+        schema_mapping: SchemaMapping | None = load_schema_mapping(mapping_path)
+    except (OSError, ValidationError, ValueError) as error:
+        schema_mapping = None
+        mapping_warnings.append(
+            f"Could not load schema mapping {mapping_path}: {error}. "
+            "All workbook sheets will be read as unstructured rows."
+        )
     workbook_paths: list[Path] = sorted(
         path
         for path in data_dir.rglob("*")
@@ -306,15 +477,24 @@ def read_spreadsheet_directory(
     workbooks: list[SpreadsheetWorkbook] = []
     for workbook_path in workbook_paths:
         relative_path: str = workbook_path.relative_to(data_dir).as_posix()
-        workbook_mapping: WorkbookMapping = select_workbook_mapping(
-            workbook_path.name,
-            schema_mapping,
-        )
+        workbook_mapping: WorkbookMapping | None = None
+        workbook_warnings: list[str] = list(mapping_warnings)
+        if schema_mapping is not None:
+            try:
+                workbook_mapping = select_workbook_mapping(
+                    workbook_path.name,
+                    schema_mapping,
+                )
+            except ValueError as error:
+                workbook_warnings.append(
+                    f"{error}. Workbook will be read as unstructured rows."
+                )
         workbooks.append(
             read_workbook(
                 workbook_path,
                 workbook_mapping,
                 source_file=relative_path,
+                warnings=workbook_warnings,
             )
         )
     return workbooks
