@@ -13,6 +13,8 @@ RUN uv sync --frozen --no-dev --no-install-project
 FROM python:3.11-slim AS runtime
 
 ENV PATH="/app/.venv/bin:$PATH" \
+    HF_HOME=/tmp/huggingface \
+    FASTEMBED_CACHE_PATH=/tmp/fastembed_cache \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 

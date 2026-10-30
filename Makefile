@@ -9,4 +9,4 @@ migrate:
 	uv run alembic upgrade head
 
 ingest:
-	uv run python -m app.tools.ingest_spreadsheets --data-dir "$(DATA)"
+	uv run python -m app.tools.ingest --data-dir "$(DATA)"

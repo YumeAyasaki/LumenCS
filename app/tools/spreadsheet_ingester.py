@@ -136,9 +136,9 @@ async def ingest_spreadsheet_directory(
                     )
                 )
                 sha256: str = hashes[workbook.source_file]
-                if existing is not None and existing.sha256 == sha256:
-                    skipped_workbooks += 1
-                    continue
+                # if existing is not None and existing.sha256 == sha256:
+                #     skipped_workbooks += 1
+                #     continue
                 if existing is not None:
                     await session.delete(existing)
                     await session.flush()

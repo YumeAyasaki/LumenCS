@@ -8,15 +8,23 @@ from datetime import datetime
 from time import perf_counter
 from typing import Annotated, AsyncIterator, Literal
 
+import pymupdf
 from fastapi import FastAPI, HTTPException, Request
-from qdrant_client import AsyncQdrantClient
+from httpx import HTTPError
+from qdrant_client import AsyncQdrantClient, QdrantClient
 from qdrant_client.http.exceptions import ApiException, ResponseHandlingException
 from pydantic import BaseModel, Field, StringConstraints
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 from app.config import Settings
+from app.tools.ingest import IngestAllResult, ingest_all_sources
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -42,8 +50,14 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         pool_pre_ping=True,
     )
     qdrant_client: AsyncQdrantClient = AsyncQdrantClient(url=settings.qdrant_url)
+    qdrant_sync_client: QdrantClient = QdrantClient(url=settings.qdrant_url)
     application.state.postgres_engine = postgres_engine
+    application.state.postgres_session_factory = async_sessionmaker(
+        postgres_engine,
+        expire_on_commit=False,
+    )
     application.state.qdrant_client = qdrant_client
+    application.state.qdrant_sync_client = qdrant_sync_client
     logger.info("Initialized PostgreSQL and Qdrant clients")
     try:
         yield
@@ -51,7 +65,10 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         try:
             await qdrant_client.close()
         finally:
-            await postgres_engine.dispose()
+            try:
+                qdrant_sync_client.close()
+            finally:
+                await postgres_engine.dispose()
         logger.info("Closed PostgreSQL and Qdrant clients")
 
 
@@ -201,3 +218,62 @@ async def ask(request: AskRequest) -> AskResponse:
         citations=[],
         latency_ms=round((perf_counter() - started_at) * 1000),
     )
+
+
+@app.post("/ingest", response_model=IngestAllResult)
+async def ingest_sources(request: Request) -> IngestAllResult:
+    """Import all Excel workbooks to PostgreSQL and PDFs to Qdrant.
+
+    The source directory, PDF collection, and embedding model are configured by
+    ``DATA_DIR``, ``QDRANT_COLLECTION``, and ``PDF_EMBEDDING_MODEL``.
+
+    Args:
+        request: Incoming request containing the application database clients.
+
+    Returns:
+        IngestAllResult: Counts and timings for both storage backends.
+
+    Raises:
+        HTTPException: If source parsing or either backing-store operation fails.
+    """
+    session_factory: async_sessionmaker[AsyncSession] = (
+        request.app.state.postgres_session_factory
+    )
+    qdrant_client: QdrantClient = request.app.state.qdrant_sync_client
+    try:
+        settings: Settings = Settings.from_environment()
+        return await ingest_all_sources(
+            session_factory=session_factory,
+            qdrant_client=qdrant_client,
+            data_dir=settings.data_dir,
+            qdrant_collection=settings.qdrant_collection,
+            pdf_embedding_model=settings.pdf_embedding_model,
+        )
+    except (
+        ApiException,
+        FileNotFoundError,
+        HTTPError,
+        OSError,
+        pymupdf.FileDataError,
+        ResponseHandlingException,
+        SQLAlchemyError,
+        ValueError,
+    ) as error:
+        logger.exception("Source ingestion endpoint failed")
+        status_code: int = (
+            503
+            if isinstance(
+                error,
+                (
+                    ApiException,
+                    HTTPError,
+                    ResponseHandlingException,
+                    SQLAlchemyError,
+                ),
+            )
+            else 422
+        )
+        raise HTTPException(
+            status_code=status_code,
+            detail="Source ingestion failed; see server logs for details.",
+        ) from error

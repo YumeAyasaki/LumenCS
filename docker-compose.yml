@@ -5,7 +5,7 @@ services:
   #   command:
   #     - sh
   #     - -c
-  #     - alembic upgrade head && python -m app.tools.ingest_spreadsheets --data-dir /app/data && exec uvicorn app.main:app --host 0.0.0.0 --port 5000
+  #     - alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port 5000
   #   environment:
   #     POSTGRES_HOST: postgres
   #     POSTGRES_PORT: "5432"
@@ -13,8 +13,14 @@ services:
   #     POSTGRES_USER: ${POSTGRES_USER:-lumen}
   #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lumen-local-dev}
   #     QDRANT_URL: http://qdrant:6333
+  #     DATA_DIR: /app/data
+  #     QDRANT_COLLECTION: ${QDRANT_COLLECTION:-policy_documents}
+  #     PDF_EMBEDDING_MODEL: ${PDF_EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
   #   ports:
   #     - "127.0.0.1:${APP_PORT:-5000}:5000"
+  #   volumes:
+  #     - fastembed_cache:/tmp/fastembed_cache
+  #     - huggingface_cache:/tmp/huggingface
   #   depends_on:
   #     postgres:
   #       condition: service_healthy
@@ -47,5 +53,7 @@ services:
       - qdrant_data:/qdrant/storage
 
 volumes:
+  fastembed_cache:
+  huggingface_cache:
   postgres_data:
   qdrant_data:

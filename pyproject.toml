@@ -10,7 +10,7 @@ dependencies = [
     "openpyxl>=3.1,<4",
     "pydantic>=2.7,<3",
     "pymupdf>=1.24,<2",
-    "qdrant-client>=1.15,<1.16",
+    "qdrant-client[fastembed]>=1.15,<1.16",
     "sqlalchemy[asyncio]>=2.0,<3",
     "uvicorn>=0.30,<1",
 ]
