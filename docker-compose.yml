@@ -1,16 +1,10 @@
 services:
-  # app:
-  #   build:
-  #     context: .
-  #   command:
-  #     - python
-  #     - -m
-  #     - app.tools.preview_spreadsheets
-  #     - --data-dir
-  #     - /app/data
-  #   volumes:
-  #     - ./data:/app/data:ro
-  #   restart: "no"
+  app:
+    build:
+      context: .
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine

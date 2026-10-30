@@ -20,8 +20,9 @@ WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
 COPY app ./app
-COPY data ./data
 
 USER 10001:10001
 
-CMD ["python", "-m", "app.tools.preview_spreadsheets", "--data-dir", "/app/data"]
+EXPOSE 8000
+
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

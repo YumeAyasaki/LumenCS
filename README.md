@@ -1,5 +1,27 @@
 # Lumen Home CS assistant
 
+## API placeholder
+
+Run the API locally with:
+
+```sh
+uv run uvicorn app.main:app --reload
+```
+
+The server exposes `GET /health` and `POST /ask`. The ask endpoint currently
+validates the request and returns a Vietnamese placeholder answer with an empty
+`citations` list; material-backed answer generation is not implemented yet.
+Its request body accepts a question, an ISO 8601 `asked_at` timestamp, and
+optional user/assistant conversation history:
+
+```sh
+curl -X POST http://127.0.0.1:8000/ask \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"Chính sách bảo hành như thế nào?","asked_at":"2026-10-29T21:00:00+07:00"}'
+```
+
+OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
+
 ## Spreadsheet reader
 
 The server-facing reader is [spreadsheet_reader.py](app/tools/spreadsheet_reader.py).
@@ -27,17 +49,15 @@ added later as a separate server integration.
 
 ## Docker
 
-Build and run the spreadsheet preview alongside local Postgres and Qdrant:
+Build and run the API alongside local Postgres and Qdrant:
 
 ```sh
 docker compose up --build
 ```
 
-The `app` container runs the existing preview command and exits when it has
-printed the parsed workbook data. Postgres and Qdrant continue running with
-persistent Docker volumes. The app does not yet connect to either database.
-The source `data/` directory is mounted read-only, so updated workbooks are
-available to the next app run.
+The API is available at `http://127.0.0.1:8000`; it does not yet connect to
+Postgres, Qdrant, or the source materials. The databases continue running with
+persistent Docker volumes.
 
 To run only the databases, use `docker compose up -d postgres qdrant`. Their
 ports are bound to localhost (`5432`, `6333`, and `6334`). Postgres defaults

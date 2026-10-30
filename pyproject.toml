@@ -4,6 +4,13 @@ version = "0.1.0"
 description = "Lumen Home customer-support assistant"
 requires-python = ">=3.11"
 dependencies = [
+    "fastapi>=0.115,<1",
     "openpyxl>=3.1,<4",
     "pydantic>=2.7,<3",
+    "uvicorn>=0.30,<1",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27,<1",
 ]
