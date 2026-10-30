@@ -20,9 +20,12 @@ WORKDIR /app
 
 COPY --from=builder /app/.venv /app/.venv
 COPY app ./app
+COPY migrations ./migrations
+COPY alembic.ini ./
+COPY data ./data
 
 USER 10001:10001
 
-EXPOSE 8000
+EXPOSE 5000
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "5000"]

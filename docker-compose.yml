@@ -1,10 +1,26 @@
 services:
-  app:
-    build:
-      context: .
-    ports:
-      - "127.0.0.1:8000:8000"
-    restart: unless-stopped
+  # app:
+  #   build:
+  #     context: .
+  #   command:
+  #     - sh
+  #     - -c
+  #     - alembic upgrade head && python -m app.tools.ingest_spreadsheets --data-dir /app/data && exec uvicorn app.main:app --host 0.0.0.0 --port 5000
+  #   environment:
+  #     POSTGRES_HOST: postgres
+  #     POSTGRES_PORT: "5432"
+  #     POSTGRES_DB: ${POSTGRES_DB:-lumen}
+  #     POSTGRES_USER: ${POSTGRES_USER:-lumen}
+  #     POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lumen-local-dev}
+  #     QDRANT_URL: http://qdrant:6333
+  #   ports:
+  #     - "127.0.0.1:${APP_PORT:-5000}:5000"
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     qdrant:
+  #       condition: service_started
+  #   restart: unless-stopped
 
   postgres:
     image: postgres:16-alpine

@@ -4,14 +4,32 @@ from __future__ import annotations
 
 import asyncio
 import unittest
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from httpx import ASGITransport, AsyncClient, Response
+from sqlalchemy.exc import SQLAlchemyError
 
-from app.main import app
+from app.main import app, lifespan
 
 
 class ApiTests(unittest.TestCase):
     """Verify API health, request validation, and placeholder response shape."""
+
+    def setUp(self) -> None:
+        """Provide mock database clients for endpoint tests."""
+        self.connection: MagicMock = MagicMock()
+        self.connection.execute = AsyncMock()
+        self.connection_context: MagicMock = MagicMock()
+        self.connection_context.__aenter__ = AsyncMock(
+            return_value=self.connection
+        )
+        self.connection_context.__aexit__ = AsyncMock(return_value=None)
+        self.postgres_engine: MagicMock = MagicMock()
+        self.postgres_engine.connect.return_value = self.connection_context
+        self.qdrant_client: MagicMock = MagicMock()
+        self.qdrant_client.get_collections = AsyncMock()
+        app.state.postgres_engine = self.postgres_engine
+        app.state.qdrant_client = self.qdrant_client
 
     def request(
         self,
@@ -40,11 +58,53 @@ class ApiTests(unittest.TestCase):
         return asyncio.run(send_request())
 
     def test_health_check(self) -> None:
-        """Return a successful health status."""
+        """Return successful PostgreSQL and Qdrant health checks."""
         response: Response = self.request("GET", "/health")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok"})
+        self.assertEqual(
+            response.json(),
+            {"status": "ok", "postgres": True, "qdrant": True},
+        )
+        self.connection.execute.assert_awaited_once()
+        self.qdrant_client.get_collections.assert_awaited_once()
+
+    def test_health_check_reports_unavailable_database(self) -> None:
+        """Return HTTP 503 when PostgreSQL cannot answer a health check."""
+        self.connection.execute.side_effect = SQLAlchemyError("database offline")
+
+        response: Response = self.request("GET", "/health")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json()["detail"],
+            {
+                "status": "unavailable",
+                "postgres": False,
+                "qdrant": True,
+            },
+        )
+
+    def test_lifespan_creates_and_closes_database_clients(self) -> None:
+        """Initialize and release both backing-store clients."""
+        postgres_engine: MagicMock = MagicMock()
+        postgres_engine.dispose = AsyncMock()
+        qdrant_client: MagicMock = MagicMock()
+        qdrant_client.close = AsyncMock()
+
+        async def run_lifespan() -> None:
+            async with lifespan(app):
+                self.assertIs(app.state.postgres_engine, postgres_engine)
+                self.assertIs(app.state.qdrant_client, qdrant_client)
+
+        with (
+            patch("app.main.create_async_engine", return_value=postgres_engine),
+            patch("app.main.AsyncQdrantClient", return_value=qdrant_client),
+        ):
+            asyncio.run(run_lifespan())
+
+        postgres_engine.dispose.assert_awaited_once()
+        qdrant_client.close.assert_awaited_once()
 
     def test_ask_returns_placeholder_response(self) -> None:
         """Accept a valid question and return the documented response fields."""

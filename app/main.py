@@ -3,16 +3,56 @@
 from __future__ import annotations
 
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from time import perf_counter
-from typing import Annotated, Literal
+from typing import Annotated, AsyncIterator, Literal
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, Request
+from qdrant_client import AsyncQdrantClient
+from qdrant_client.http.exceptions import ApiException, ResponseHandlingException
 from pydantic import BaseModel, Field, StringConstraints
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+
+from app.config import Settings
 
 logger: logging.Logger = logging.getLogger(__name__)
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+
+
+@asynccontextmanager
+async def lifespan(application: FastAPI) -> AsyncIterator[None]:
+    """Create and dispose PostgreSQL and Qdrant clients for the server lifetime.
+
+    Args:
+        application: FastAPI application receiving the client handles.
+
+    Yields:
+        None: The application runs while both configured clients are available.
+
+    Raises:
+        ValueError: If required connection settings are empty.
+    """
+    settings: Settings = Settings.from_environment()
+    postgres_engine: AsyncEngine = create_async_engine(
+        settings.database_url,
+        pool_pre_ping=True,
+    )
+    qdrant_client: AsyncQdrantClient = AsyncQdrantClient(url=settings.qdrant_url)
+    application.state.postgres_engine = postgres_engine
+    application.state.qdrant_client = qdrant_client
+    logger.info("Initialized PostgreSQL and Qdrant clients")
+    try:
+        yield
+    finally:
+        try:
+            await qdrant_client.close()
+        finally:
+            await postgres_engine.dispose()
+        logger.info("Closed PostgreSQL and Qdrant clients")
 
 
 class ConversationMessage(BaseModel):
@@ -65,36 +105,76 @@ class AskResponse(BaseModel):
 
 
 class HealthResponse(BaseModel):
-    """Report that the API process is responsive.
+    """Report API and backing-store readiness.
 
     Attributes:
-        status: Health status string.
+        status: Overall health status string.
+        postgres: Whether PostgreSQL responded to a connection check.
+        qdrant: Whether Qdrant responded to a collections check.
 
     Raises:
-        ValidationError: If the status is not ``ok``.
+        ValidationError: If the status is not a supported health state.
     """
 
-    status: Literal["ok"]
+    status: Literal["ok", "unavailable"]
+    postgres: bool
+    qdrant: bool
 
 
 app: FastAPI = FastAPI(
     title="Lumen Home Assistant API",
     description="Placeholder API for the Lumen Home customer-support assistant.",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 
 @app.get("/health", response_model=HealthResponse)
-async def health_check() -> HealthResponse:
-    """Return the process health status.
+async def health_check(request: Request) -> HealthResponse:
+    """Check that the API can reach PostgreSQL and Qdrant.
+
+    Args:
+        request: Incoming request containing the application database clients.
 
     Returns:
-        HealthResponse: The health status with value ``ok``.
+        HealthResponse: Readiness status for both backing stores.
 
     Raises:
-        None.
+        HTTPException: If either database health check fails, with HTTP 503.
     """
-    return HealthResponse(status="ok")
+    postgres_engine: AsyncEngine = request.app.state.postgres_engine
+    qdrant_client: AsyncQdrantClient = request.app.state.qdrant_client
+    postgres_available: bool = True
+    qdrant_available: bool = True
+
+    try:
+        async with postgres_engine.connect() as connection:
+            await connection.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        postgres_available = False
+        logger.exception("PostgreSQL health check failed")
+
+    try:
+        await qdrant_client.get_collections()
+    except (ApiException, ResponseHandlingException):
+        qdrant_available = False
+        logger.exception("Qdrant health check failed")
+
+    response: HealthResponse = HealthResponse(
+        status=(
+            "ok"
+            if postgres_available and qdrant_available
+            else "unavailable"
+        ),
+        postgres=postgres_available,
+        qdrant=qdrant_available,
+    )
+    if not postgres_available or not qdrant_available:
+        raise HTTPException(
+            status_code=503,
+            detail=response.model_dump(),
+        )
+    return response
 
 
 @app.post("/ask", response_model=AskResponse)
