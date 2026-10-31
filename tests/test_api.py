@@ -10,7 +10,7 @@ from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import Settings
-from app.tools.pdf_retriever import PDFSearchResult
+from app.llm_agent import AgentResult, LLMConfigurationError, LLMProviderError
 from app.tools.ingest import IngestAllResult
 from app.tools.pdf_ingester import PDFIngestionResult
 from app.tools.spreadsheet_ingester import IngestionResult
@@ -49,6 +49,7 @@ class ApiTests(unittest.TestCase):
         method: str,
         path: str,
         payload: dict[str, object] | None = None,
+        headers: dict[str, str] | None = None,
     ) -> Response:
         """Send an HTTP request through the application ASGI interface.
 
@@ -66,7 +67,12 @@ class ApiTests(unittest.TestCase):
                 transport=ASGITransport(app=app),
                 base_url="http://testserver",
             ) as client:
-                return await client.request(method, path, json=payload)
+                return await client.request(
+                    method,
+                    path,
+                    json=payload,
+                    headers=headers,
+                )
 
         return asyncio.run(send_request())
 
@@ -126,23 +132,21 @@ class ApiTests(unittest.TestCase):
         qdrant_client.close.assert_awaited_once()
         qdrant_sync_client.close.assert_called_once()
 
-    def test_ask_returns_retrieved_policy_excerpts(self) -> None:
-        """Return material-backed excerpts and clause citations."""
-        result: PDFSearchResult = PDFSearchResult(
-            source_file="policy_handbook.pdf",
-            section_id="3.2",
-            section_title="3. Bảo hành",
-            page=1,
-            cite_id="policy_handbook.pdf#3.2",
-            text="3. Bảo hành\n3.2. Kích hoạt trong 45 ngày.",
-            document_version="3.2",
-            effective_date="2026-10-01",
-            score=0.82,
+    def test_ask_returns_generated_answer_and_tool_citations(self) -> None:
+        """Return the LLM answer and citations approved by its tool run."""
+        result: AgentResult = AgentResult(
+            answer="Bạn cần kích hoạt trong 45 ngày.",
+            citations=["policy_handbook.pdf#3.2"],
+            prompt_tokens=100,
+            completion_tokens=25,
+            tool_calls=1,
+            llm_latency_ms=150,
+            estimated_cost_usd=None,
         )
         with patch(
-            "app.main.retrieve_policy_chunks",
-            new=AsyncMock(return_value=[result]),
-        ):
+            "app.main.answer_question",
+            new=AsyncMock(return_value=result),
+        ) as answer_question:
             response: Response = self.request(
                 "POST",
                 "/ask",
@@ -158,15 +162,24 @@ class ApiTests(unittest.TestCase):
             set(response.json()),
             {"answer", "citations", "latency_ms"},
         )
-        self.assertIn("Kích hoạt trong 45 ngày", response.json()["answer"])
+        self.assertEqual(response.json()["answer"], result.answer)
         self.assertEqual(response.json()["citations"], ["policy_handbook.pdf#3.2"])
         self.assertGreaterEqual(response.json()["latency_ms"], 0)
+        answer_question.assert_awaited_once()
+        self.assertEqual(
+            answer_question.await_args.kwargs["asked_at"],
+            "2026-10-29T21:00:00+07:00",
+        )
+        self.assertEqual(
+            answer_question.await_args.kwargs["history"],
+            [{"role": "user", "content": "Xin chào"}],
+        )
 
-    def test_ask_reports_no_matching_policy_excerpt(self) -> None:
-        """Avoid inventing an answer when retrieval returns no policy chunks."""
+    def test_ask_reports_provider_configuration_failure(self) -> None:
+        """Return a service error without exposing provider configuration."""
         with patch(
-            "app.main.retrieve_policy_chunks",
-            new=AsyncMock(return_value=[]),
+            "app.main.answer_question",
+            new=AsyncMock(side_effect=LLMConfigurationError("missing key")),
         ):
             response: Response = self.request(
                 "POST",
@@ -177,9 +190,60 @@ class ApiTests(unittest.TestCase):
                 },
             )
 
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(
+            response.json()["detail"],
+            "The LLM provider is not configured.",
+        )
+
+    def test_ask_reports_provider_failure(self) -> None:
+        """Return HTTP 502 for a failed provider call."""
+        with patch(
+            "app.main.answer_question",
+            new=AsyncMock(side_effect=LLMProviderError("provider unavailable")),
+        ):
+            response: Response = self.request(
+                "POST",
+                "/ask",
+                {
+                    "question": "Tôi cần hỗ trợ gì?",
+                    "asked_at": "2026-10-29T21:00:00+07:00",
+                },
+            )
+
+        self.assertEqual(response.status_code, 502)
+
+    def test_ask_streams_validated_answer_when_requested(self) -> None:
+        """Return server-sent answer, citation, and completion events."""
+        result: AgentResult = AgentResult(
+            answer="Được hỗ trợ bảo hành.",
+            citations=["handbook.pdf#3.2"],
+            prompt_tokens=10,
+            completion_tokens=5,
+            tool_calls=1,
+            llm_latency_ms=25,
+            estimated_cost_usd=None,
+        )
+        with patch(
+            "app.main.answer_question",
+            new=AsyncMock(return_value=result),
+        ):
+            response: Response = self.request(
+                "POST",
+                "/ask",
+                {
+                    "question": "Tôi được bảo hành không?",
+                    "asked_at": "2026-10-29T21:00:00+07:00",
+                },
+                headers={"Accept": "text/event-stream"},
+            )
+
         self.assertEqual(response.status_code, 200)
-        self.assertIn("chưa tìm thấy", response.json()["answer"])
-        self.assertEqual(response.json()["citations"], [])
+        self.assertEqual(response.headers["content-type"], "text/event-stream; charset=utf-8")
+        self.assertIn("event: answer", response.text)
+        self.assertIn("event: citations", response.text)
+        self.assertIn('["handbook.pdf#3.2"]', response.text)
+        self.assertIn("event: done", response.text)
 
     def test_ask_rejects_empty_question(self) -> None:
         """Reject a question containing only whitespace."""
@@ -193,6 +257,54 @@ class ApiTests(unittest.TestCase):
         )
 
         self.assertEqual(response.status_code, 422)
+
+    def test_list_model_tools(self) -> None:
+        """Publish model tool schemas for agent function calling."""
+        response: Response = self.request("GET", "/tools")
+
+        self.assertEqual(response.status_code, 200)
+        definitions: list[dict[str, object]] = response.json()
+        names: list[str] = []
+        for item in definitions:
+            function: object = item.get("function")
+            if isinstance(function, dict):
+                name: object = function.get("name")
+                if isinstance(name, str):
+                    names.append(name)
+        self.assertIn("quote_price", names)
+        self.assertIn("search_policy", names)
+        self.assertIn("calculate", names)
+
+    def test_invoke_model_tool(self) -> None:
+        """Execute a validated model function call through the API."""
+        session: AsyncMock = AsyncMock()
+        session_context: MagicMock = MagicMock()
+        session_context.__aenter__ = AsyncMock(return_value=session)
+        session_context.__aexit__ = AsyncMock(return_value=None)
+        app.state.postgres_session_factory = MagicMock(
+            return_value=session_context
+        )
+
+        response: Response = self.request(
+            "POST",
+            "/tools/calculate",
+            {
+                "arguments": {
+                    "as_of": "2026-10-29T21:00:00+07:00",
+                    "expression": "100 * 0.9",
+                }
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload: dict[str, object] = response.json()
+        self.assertEqual(payload["tool_name"], "calculate")
+        self.assertEqual(payload["citations"], [])
+        records: object = payload["records"]
+        self.assertIsInstance(records, list)
+        first_record: object = records[0]
+        self.assertIsInstance(first_record, dict)
+        self.assertEqual(first_record["result"], "90.0")
 
     def test_ingest_endpoint_runs_both_source_ingesters(self) -> None:
         """Return the combined PostgreSQL and Qdrant ingestion summary."""

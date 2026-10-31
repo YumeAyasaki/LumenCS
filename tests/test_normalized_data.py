@@ -10,7 +10,12 @@ from unittest.mock import AsyncMock, MagicMock
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import Price, Promotion
-from app.tools.normalized_data import get_prices, get_promotions
+from app.tools.normalized_data import (
+    find_service_centres,
+    get_prices,
+    get_promotions,
+    get_service_fees,
+)
 
 
 class NormalizedDataTests(unittest.IsolatedAsyncioTestCase):
@@ -94,6 +99,34 @@ class NormalizedDataTests(unittest.IsolatedAsyncioTestCase):
             model="LH-AC09S",
         )
         self.assertEqual(excluded, [])
+
+    async def test_service_centre_filters_by_district(self) -> None:
+        """Filter centres by both province and district when requested."""
+        await find_service_centres(
+            self.session,
+            date(2026, 10, 28),
+            province="Hà Nội",
+            district="Cầu Giấy",
+        )
+
+        statement = self.session.scalars.await_args.args[0]
+        sql: str = str(statement.compile(compile_kwargs={"literal_binds": True}))
+        self.assertIn("service_centres.province = 'Hà Nội'", sql)
+        self.assertIn("service_centres.district = 'Cầu Giấy'", sql)
+
+    async def test_service_fee_filters_by_name_and_product_group(self) -> None:
+        """Support user-friendly fee-name search without unsafe SQL."""
+        await get_service_fees(
+            self.session,
+            date(2026, 10, 28),
+            product_group="Điều hòa",
+            service_query="vệ sinh%",
+        )
+
+        statement = self.session.scalars.await_args.args[0]
+        sql: str = str(statement.compile(compile_kwargs={"literal_binds": True}))
+        self.assertIn("lower(service_fees.service) LIKE lower", sql)
+        self.assertIn("ESCAPE", sql)
 
 
 if __name__ == "__main__":

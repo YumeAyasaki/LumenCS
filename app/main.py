@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -13,10 +14,11 @@ from typing import Annotated, AsyncIterator, Literal
 from fastembed import TextEmbedding
 import pymupdf
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from httpx import HTTPError
 from qdrant_client import AsyncQdrantClient, QdrantClient
 from qdrant_client.http.exceptions import ApiException, ResponseHandlingException
-from pydantic import BaseModel, Field, StringConstraints
+from pydantic import BaseModel, Field, StringConstraints, ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
@@ -27,8 +29,22 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from app.config import Settings
+from app.llm_agent import (
+    AgentResult,
+    LLMConfigurationError,
+    LLMProviderError,
+    answer_question,
+)
 from app.tools.ingest import IngestAllResult, ingest_all_sources
-from app.tools.pdf_retriever import PDFSearchResult, retrieve_policy_chunks
+from app.tools.model_tools import (
+    ModelToolContext,
+    ModelToolDefinition,
+    ToolInvocationRequest,
+    ToolResult,
+    UnknownModelToolError,
+    execute_model_tool,
+    get_model_tool_definitions,
+)
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -209,61 +225,184 @@ async def health_check(request: Request) -> HealthResponse:
 
 
 @app.post("/ask", response_model=AskResponse)
-async def ask(body: AskRequest, request: Request) -> AskResponse:
-    """Return source-grounded policy excerpts retrieved for a customer question.
+async def ask(
+    body: AskRequest,
+    request: Request,
+) -> AskResponse | StreamingResponse:
+    """Answer a customer question using typed tools over approved source data.
 
     Args:
         body: Question, timestamp, and optional conversation history.
-        request: Application state containing the embedding and Qdrant clients.
+        request: Application state containing provider and data-store clients.
 
     Returns:
-        AskResponse: Up to three relevant Vietnamese policy excerpts and citations.
+        AskResponse | StreamingResponse: Vietnamese answer with citations
+            returned by this run's tools. Clients accepting
+            ``text/event-stream`` receive validated answer chunks followed by
+            citation and completion events.
 
     Raises:
-        HTTPException: If Qdrant retrieval fails, with HTTP 503.
+        HTTPException: If the LLM configuration/provider or a source store fails.
     """
     started_at: float = perf_counter()
     settings: Settings = request.app.state.settings
     qdrant_client: AsyncQdrantClient = request.app.state.qdrant_client
     embedding_model: TextEmbedding = request.app.state.pdf_embedding_model
+    session_factory: async_sessionmaker[AsyncSession] = (
+        request.app.state.postgres_session_factory
+    )
     try:
-        results: list[PDFSearchResult] = await retrieve_policy_chunks(
+        agent_result: AgentResult = await answer_question(
+            question=body.question,
+            asked_at=body.asked_at.isoformat(),
+            history=[message.model_dump() for message in body.history],
+            session_factory=session_factory,
             qdrant_client=qdrant_client,
             embedding_model=embedding_model,
-            question=body.question,
-            as_of=body.asked_at,
-            base_collection_name=settings.qdrant_collection,
-            embedding_model_name=settings.pdf_embedding_model,
+            settings=settings,
         )
-    except (ApiException, HTTPError, ResponseHandlingException) as error:
-        logger.exception("Policy retrieval failed")
+    except LLMConfigurationError as error:
+        logger.error("LLM configuration error: %s", error)
         raise HTTPException(
             status_code=503,
-            detail="Policy retrieval is temporarily unavailable.",
+            detail="The LLM provider is not configured.",
+        ) from error
+    except LLMProviderError as error:
+        logger.exception("LLM answer generation failed")
+        raise HTTPException(
+            status_code=502,
+            detail="The answer provider is temporarily unavailable.",
+        ) from error
+    except (
+        ApiException,
+        HTTPError,
+        ResponseHandlingException,
+        SQLAlchemyError,
+    ) as error:
+        logger.exception("A source lookup failed while answering the question")
+        raise HTTPException(
+            status_code=503,
+            detail="A source data service is temporarily unavailable.",
         ) from error
 
-    citations: list[str] = list(dict.fromkeys(result.cite_id for result in results))
-    if results:
-        excerpts: list[str] = [
-            f"{result.cite_id}:\n{result.text}"
-            for result in results
-        ]
-        answer: str = "Các nội dung liên quan trong tài liệu:\n\n" + "\n\n".join(
-            excerpts
-        )
-    else:
-        answer = "Tôi chưa tìm thấy thông tin phù hợp trong sổ tay chính sách."
     latency_ms: int = round((perf_counter() - started_at) * 1000)
     logger.info(
-        "Policy retrieval completed: %d results in %d ms",
-        len(results),
+        "Ask request completed: provider=%s llm_latency_ms=%d total_latency_ms=%d",
+        settings.llm_provider,
+        agent_result.llm_latency_ms,
         latency_ms,
     )
-    return AskResponse(
-        answer=answer,
-        citations=citations,
+    ask_response: AskResponse = AskResponse(
+        answer=agent_result.answer,
+        citations=agent_result.citations,
         latency_ms=latency_ms,
     )
+    if "text/event-stream" in request.headers.get("accept", "").lower():
+        async def event_stream() -> AsyncIterator[str]:
+            """Yield validated answer text, then citations and completion data.
+
+            Yields:
+                str: Server-sent events containing answer chunks, citations,
+                    and request timing.
+            """
+            chunk_size: int = 32
+            for start in range(0, len(ask_response.answer), chunk_size):
+                chunk: str = ask_response.answer[start : start + chunk_size]
+                event_data: str = json.dumps(
+                    {"text": chunk},
+                    ensure_ascii=False,
+                )
+                yield f"event: answer\ndata: {event_data}\n\n"
+            citations_event: str = json.dumps(
+                ask_response.citations,
+                ensure_ascii=False,
+            )
+            yield f"event: citations\ndata: {citations_event}\n\n"
+            completion_event: str = json.dumps(
+                {"latency_ms": ask_response.latency_ms},
+                ensure_ascii=False,
+            )
+            yield f"event: done\ndata: {completion_event}\n\n"
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+        )
+    return ask_response
+
+
+@app.get("/tools", response_model=list[ModelToolDefinition])
+async def list_model_tools() -> list[ModelToolDefinition]:
+    """List typed function declarations that an LLM or agent can call.
+
+    Returns:
+        list[ModelToolDefinition]: Model-ready names, descriptions, and schemas.
+    """
+    return get_model_tool_definitions()
+
+
+@app.post("/tools/{tool_name}", response_model=ToolResult)
+async def invoke_model_tool(
+    tool_name: str,
+    body: ToolInvocationRequest,
+    request: Request,
+) -> ToolResult:
+    """Execute one validated data or utility tool for an agent.
+
+    Args:
+        tool_name: Registered tool name selected by the model.
+        body: JSON arguments validated against the selected tool's Pydantic
+            input schema.
+        request: Application state containing database and policy clients.
+
+    Returns:
+        ToolResult: Typed records and only citations returned by this call.
+
+    Raises:
+        HTTPException: With status 404 for an unknown tool, 422 for invalid
+            arguments, or 503 if a backing data store is unavailable.
+    """
+    session_factory: async_sessionmaker[AsyncSession] = (
+        request.app.state.postgres_session_factory
+    )
+    try:
+        async with session_factory() as session:
+            context = ModelToolContext(
+                session=session,
+                qdrant_client=request.app.state.qdrant_client,
+                embedding_model=request.app.state.pdf_embedding_model,
+                settings=request.app.state.settings,
+            )
+            result: ToolResult = await execute_model_tool(
+                tool_name,
+                body.arguments,
+                context,
+            )
+    except UnknownModelToolError as error:
+        raise HTTPException(status_code=404, detail=str(error)) from error
+    except ValidationError as error:
+        raise HTTPException(status_code=422, detail=error.errors()) from error
+    except ValueError as error:
+        raise HTTPException(status_code=422, detail=str(error)) from error
+    except (
+        ApiException,
+        HTTPError,
+        ResponseHandlingException,
+        SQLAlchemyError,
+    ) as error:
+        logger.exception("Model tool %s failed", tool_name)
+        raise HTTPException(
+            status_code=503,
+            detail=f"Tool '{tool_name}' is temporarily unavailable.",
+        ) from error
+
+    logger.info(
+        "Model tool %s returned %d records and %d citations",
+        tool_name,
+        len(result.records),
+        len(result.citations),
+    )
+    return result
 
 
 @app.post("/ingest", response_model=IngestAllResult)

@@ -241,8 +241,9 @@ async def find_service_centres(
     as_of: AsOf,
     province: str | None = None,
     product_group: str | None = None,
+    district: str | None = None,
 ) -> list[ServiceCentre]:
-    """Query service centres, optionally filtered by province and capability.
+    """Query service centres, optionally filtered by location and capability.
 
     The source service-centre sheet has no effective-date columns; ``as_of`` is
     accepted for a consistent tool interface but does not filter its records.
@@ -252,6 +253,7 @@ async def find_service_centres(
         as_of: Date context supplied by the calling server tool.
         province: Optional exact province or city.
         product_group: Optional product group capability to require.
+        district: Optional exact district within the province.
 
     Returns:
         Matching centres with source citations.
@@ -264,6 +266,8 @@ async def find_service_centres(
     )
     if province is not None:
         statement = statement.where(ServiceCentre.province == province)
+    if district is not None:
+        statement = statement.where(ServiceCentre.district == district)
     result = await session.scalars(statement.order_by(ServiceCentre.code))
     centres: list[ServiceCentre] = list(result.all())
     if product_group is None:
@@ -280,6 +284,7 @@ async def get_service_fees(
     as_of: AsOf,
     service_code: str | None = None,
     product_group: str | None = None,
+    service_query: str | None = None,
 ) -> list[ServiceFee]:
     """Query typed service-fee records with source citations.
 
@@ -291,6 +296,7 @@ async def get_service_fees(
         as_of: Date context supplied by the calling server tool.
         service_code: Optional exact service code.
         product_group: Optional product group in the applicability list.
+        service_query: Optional case-insensitive substring of service name.
 
     Returns:
         Matching service fees with source citations.
@@ -301,6 +307,15 @@ async def get_service_fees(
     statement = select(ServiceFee).options(*_citation_load_options(ServiceFee))
     if service_code is not None:
         statement = statement.where(ServiceFee.code == service_code)
+    if service_query is not None:
+        escaped_query: str = (
+            service_query.replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
+        statement = statement.where(
+            ServiceFee.service.ilike(f"%{escaped_query}%", escape="\\")
+        )
     result = await session.scalars(statement.order_by(ServiceFee.code))
     fees: list[ServiceFee] = list(result.all())
     if product_group is None:

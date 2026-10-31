@@ -9,12 +9,14 @@ uv run uvicorn app.main:app --reload
 ```
 
 The server exposes `GET /health`, `POST /ask`, and `POST /ingest`. The ask
-endpoint embeds the question and asynchronously retrieves up to three relevant
-policy excerpts from Qdrant. It returns the source text and clause citations;
-it filters out policies not yet effective at the request's `asked_at` time and
-does not use a language model to synthesize an answer. Its request body accepts
-a question, an ISO 8601 `asked_at` timestamp, and optional user/assistant
-conversation history:
+endpoint uses a chat-completions LLM with typed tools for PostgreSQL and Qdrant.
+All tool calls use the request's `asked_at` timestamp for effective-date
+filtering. Final citations are restricted to IDs returned by tools in that
+request, with one retry for invalid answers or citations. It accepts a
+question, an ISO 8601 `asked_at` timestamp, and optional user/assistant
+conversation history. Requests accepting `text/event-stream` receive validated
+answer chunks followed by citation and latency events; standard requests keep
+the JSON response:
 
 ```sh
 curl -X POST http://127.0.0.1:5000/ask \
@@ -23,6 +25,39 @@ curl -X POST http://127.0.0.1:5000/ask \
 ```
 
 OpenAPI documentation is available at `http://127.0.0.1:5000/docs`.
+
+## Agent tools
+
+`GET /tools` returns model-ready function declarations with JSON schemas.
+Invoke a declared tool with `POST /tools/{tool_name}` and an `arguments` object;
+each tool requires the question's ISO 8601 `as_of` timestamp. For example:
+
+```sh
+curl -X POST http://127.0.0.1:5000/tools/quote_price \
+  -H 'Content-Type: application/json' \
+  -d '{"arguments":{"as_of":"2026-10-29T21:00:00+07:00","model":"LH-AC09N","province":"Hà Nội"}}'
+```
+
+The registry includes `get_product_details`, `quote_price`, `get_promotions`,
+`get_warranty`, `get_region`, `find_service_centres`, `get_service_fee`,
+`search_policy`, `calculate`, and `get_date_context`. Spreadsheet tools query
+normalized typed tables and return source-row citations; policy search returns
+handbook clause citations. `calculate` accepts arithmetic only and does not
+execute model-provided code. Tools are provider-neutral declarations and an
+executor used by `/ask`; the LLM cannot issue SQL or cite sources that were not
+returned by a tool.
+
+## LLM providers
+
+The default provider is Gemini's OpenAI-compatible chat-completions endpoint.
+Put `GEMINI_KEY` in the local `.env` file (which is gitignored), then run the
+server normally. Set `LLM_PROVIDER=openai` and `OPENAI_API_KEY` to use OpenAI.
+For other compatible services, set `LLM_PROVIDER=openai-compatible`,
+`LLM_BASE_URL`, and `LLM_MODEL`; `LLM_API_KEY` is optional for local services.
+Optional `LLM_INPUT_COST_PER_MILLION_USD` and
+`LLM_OUTPUT_COST_PER_MILLION_USD` values enable estimated cost logging. Token
+counts and per-stage timings are logged without logging credentials or prompts.
+The same environment settings can be used with Docker Compose.
 
 `POST /ingest` processes the configured `DATA_DIR` in one request. It stores
 Excel workbook rows in PostgreSQL and embeds clause-level PDF chunks into a
