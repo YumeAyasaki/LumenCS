@@ -13,10 +13,12 @@ from app.config import Settings
 from app.llm_agent import (
     AgentResult,
     AgentStepMetrics,
+    AgentToolExecution,
     LLMConfigurationError,
     LLMProviderError,
 )
 from app.tools.ingest import IngestAllResult
+from app.tools.model_tools import ToolInvocationCall, ToolResult
 from app.tools.pdf_ingester import PDFIngestionResult
 from app.tools.spreadsheet_ingester import IngestionResult
 from app.main import app, lifespan
@@ -156,6 +158,23 @@ class ApiTests(unittest.TestCase):
                     completion_tokens=25,
                 )
             ],
+            tool_executions=[
+                AgentToolExecution(
+                    call_id="call-warranty-1",
+                    call=ToolInvocationCall(
+                        name="get_warranty",
+                        arguments={
+                            "model": "LH-AC09N",
+                            "as_of": "2026-10-29T21:00:00+07:00",
+                        },
+                    ),
+                    answer=ToolResult(
+                        tool_name="get_warranty",
+                        records=[],
+                        citations=["product_catalog.xlsx#sheet=warranty&row=6"],
+                    ),
+                )
+            ],
         )
         with patch(
             "app.main.answer_question",
@@ -179,6 +198,7 @@ class ApiTests(unittest.TestCase):
                 "citations",
                 "latency_ms",
                 "steps",
+                "tool_executions",
             },
         )
         self.assertEqual(response.json()["answer"], result.answer)
@@ -190,6 +210,14 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(response.json()["steps"][0]["prompt_tokens"], 100)
         self.assertEqual(response.json()["steps"][0]["completion_tokens"], 25)
+        self.assertEqual(
+            response.json()["tool_executions"][0]["call"]["name"],
+            "get_warranty",
+        )
+        self.assertEqual(
+            response.json()["tool_executions"][0]["answer"]["citations"],
+            ["product_catalog.xlsx#sheet=warranty&row=6"],
+        )
         self.assertNotIn("estimated_cost_usd", response.json())
         self.assertNotIn("estimated_cost_usd", response.json()["steps"][0])
         self.assertGreaterEqual(response.json()["latency_ms"], 0)
@@ -260,6 +288,23 @@ class ApiTests(unittest.TestCase):
                     completion_tokens=5,
                 )
             ],
+            tool_executions=[
+                AgentToolExecution(
+                    call_id="call-policy-1",
+                    call=ToolInvocationCall(
+                        name="search_policy",
+                        arguments={
+                            "query": "kích hoạt bảo hành",
+                            "as_of": "2026-10-29T21:00:00+07:00",
+                        },
+                    ),
+                    answer=ToolResult(
+                        tool_name="search_policy",
+                        records=[],
+                        citations=["handbook.pdf#3.2"],
+                    ),
+                )
+            ],
         )
         with patch(
             "app.main.answer_question",
@@ -278,6 +323,12 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["content-type"], "text/event-stream; charset=utf-8")
         self.assertIn("event: answer", response.text)
+        self.assertIn("event: tool_calls", response.text)
+        self.assertIn('"call_id": "call-policy-1"', response.text)
+        self.assertIn('"name": "search_policy"', response.text)
+        self.assertIn('"query": "kích hoạt bảo hành"', response.text)
+        self.assertIn('"tool_name": "search_policy"', response.text)
+        self.assertIn('"handbook.pdf#3.2"', response.text)
         self.assertIn("event: citations", response.text)
         self.assertIn('["handbook.pdf#3.2"]', response.text)
         self.assertIn("event: metrics", response.text)
@@ -377,9 +428,18 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         payload: dict[str, object] = response.json()
-        self.assertEqual(payload["tool_name"], "calculate")
-        self.assertEqual(payload["citations"], [])
-        records: object = payload["records"]
+        call: object = payload["call"]
+        self.assertIsInstance(call, dict)
+        self.assertEqual(call["name"], "calculate")
+        self.assertEqual(
+            call["arguments"]["expression"],
+            "100 * 0.9",
+        )
+        answer: object = payload["answer"]
+        self.assertIsInstance(answer, dict)
+        self.assertEqual(answer["tool_name"], "calculate")
+        self.assertEqual(answer["citations"], [])
+        records: object = answer["records"]
         self.assertIsInstance(records, list)
         first_record: object = records[0]
         self.assertIsInstance(first_record, dict)

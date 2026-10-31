@@ -14,9 +14,13 @@ All tool calls use the request's `asked_at` timestamp for effective-date
 filtering. Final citations are restricted to IDs returned by tools in that
 request, with one retry for invalid answers or citations. It accepts a
 question, an ISO 8601 `asked_at` timestamp, and optional user/assistant
-conversation history. Requests accepting `text/event-stream` receive validated
-answer chunks followed by citation, per-step metrics, and latency events;
-standard JSON responses include the same per-step data. Each LLM request and
+conversation history. The system prompt includes the asked date converted to
+`Asia/Ho_Chi_Minh` and formatted `dd/mm/yyyy`; timestamps without a timezone
+offset are treated as Vietnam local time. JSON responses and requests accepting
+`text/event-stream` include each tool call's name and arguments along with its
+structured tool answer; the Streamlit chat displays these in a
+"Các công cụ đã tra cứu" expander. SSE responses also include validated answer
+chunks, citations, per-step metrics, and latency events. Each LLM request and
 typed-tool call reports its duration and provider-reported token counts when
 available. Missing token counts are omitted. Parallel tool durations are
 individual elapsed times and therefore can overlap:
@@ -44,7 +48,9 @@ citations, and sends the local current time as `asked_at`.
 
 `GET /tools` returns model-ready function declarations with JSON schemas.
 Invoke a declared tool with `POST /tools/{tool_name}` and an `arguments` object;
-each tool requires the question's ISO 8601 `as_of` timestamp. For example:
+each tool requires the question's ISO 8601 `as_of` timestamp. Responses contain
+both `call` (the invoked name and arguments) and `answer` (the structured
+result with citations). For example:
 
 ```sh
 curl -X POST http://127.0.0.1:5000/tools/quote_price \

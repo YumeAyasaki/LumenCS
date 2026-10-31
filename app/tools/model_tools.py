@@ -555,6 +555,31 @@ class ToolInvocationRequest(BaseModel):
     arguments: dict[str, object]
 
 
+class ToolInvocationCall(BaseModel):
+    """Describe the tool call visible to a client.
+
+    Attributes:
+        name: Registered tool name that was invoked.
+        arguments: Arguments used for the call, including the effective date
+            when the model supplied a valid JSON object.
+    """
+
+    name: str
+    arguments: dict[str, object] | str
+
+
+class ToolInvocationResponse(BaseModel):
+    """Return both the executed tool call and its structured answer.
+
+    Attributes:
+        call: Tool name and arguments used for this invocation.
+        answer: Typed source records and citations returned by the tool.
+    """
+
+    call: ToolInvocationCall
+    answer: ToolResult
+
+
 @dataclass(frozen=True)
 class ModelToolContext:
     """Hold the clients required by tool handlers for one invocation.

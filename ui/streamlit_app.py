@@ -32,7 +32,7 @@ def _api_url() -> str:
 def _stream_answer(
     question: str,
     history: list[dict[str, str]],
-) -> tuple[str, list[str], int | None, list[dict[str, Any]]]:
+) -> tuple[str, list[str], int | None, list[dict[str, Any]], list[dict[str, Any]]]:
     """Ask the API a question and consume its server-sent events.
 
     Args:
@@ -40,7 +40,8 @@ def _stream_answer(
         history: Earlier user and assistant messages in this chat.
 
     Returns:
-        tuple: Answer text, citations, total API latency, and per-step metrics.
+        tuple: Answer text, citations, total latency, per-step metrics, and
+            executed tool calls with their answers.
 
     Raises:
         httpx.HTTPError: If the API cannot be reached or returns an HTTP error.
@@ -50,6 +51,7 @@ def _stream_answer(
     citations: list[str] = []
     latency_ms: int | None = None
     step_metrics: list[dict[str, Any]] = []
+    tool_executions: list[dict[str, Any]] = []
     event_name: str = ""
     payload: dict[str, Any] = {
         "question": question,
@@ -107,8 +109,24 @@ def _stream_answer(
                     ):
                         raise ValueError("The API returned invalid step metrics.")
                     step_metrics = decoded_steps
+                elif event_name == "tool_calls":
+                    if not isinstance(decoded_event, dict):
+                        raise ValueError("The API returned invalid tool calls.")
+                    decoded_executions: Any = decoded_event.get("tool_executions")
+                    if not isinstance(decoded_executions, list) or not all(
+                        isinstance(execution, dict)
+                        for execution in decoded_executions
+                    ):
+                        raise ValueError("The API returned invalid tool calls.")
+                    tool_executions = decoded_executions
 
-    return "".join(answer_parts), citations, latency_ms, step_metrics
+    return (
+        "".join(answer_parts),
+        citations,
+        latency_ms,
+        step_metrics,
+        tool_executions,
+    )
 
 
 def _render_citations(citations: list[str]) -> None:
@@ -154,6 +172,38 @@ def _render_step_metrics(
             )
 
 
+def _render_tool_executions(
+    executions: list[dict[str, Any]],
+) -> None:
+    """Display each tool call and the structured answer returned to the agent.
+
+    Args:
+        executions: Validated tool-call traces returned by the API.
+    """
+    if not executions:
+        return
+    with st.expander("Các công cụ đã tra cứu"):
+        for execution in executions:
+            call_value: Any = execution.get("call", {})
+            call: dict[str, Any] = (
+                call_value if isinstance(call_value, dict) else {}
+            )
+            tool_name: Any = call.get("name", "unknown")
+            call_id: Any = execution.get("call_id", "")
+            label: str = f"`{tool_name}`"
+            if call_id:
+                label += f" · `{call_id}`"
+            with st.container(border=True):
+                st.markdown(f"**Lệnh gọi:** {label}")
+                st.json(call.get("arguments", {}))
+                error: Any = execution.get("error")
+                if isinstance(error, str):
+                    st.error(error)
+                else:
+                    st.markdown("**Kết quả công cụ:**")
+                    st.json(execution.get("answer", {}))
+
+
 def main() -> None:
     """Render the chat interface and manage conversation state."""
     st.set_page_config(
@@ -187,6 +237,11 @@ def main() -> None:
                     isinstance(metric, dict) for metric in metrics_value
                 ):
                     _render_step_metrics(metrics_value)
+                executions_value: Any = message.get("tool_executions", [])
+                if isinstance(executions_value, list) and all(
+                    isinstance(execution, dict) for execution in executions_value
+                ):
+                    _render_tool_executions(executions_value)
 
     question: str | None = st.chat_input("Bạn muốn tìm hiểu thông tin gì?")
     if question is None:
@@ -210,6 +265,7 @@ def main() -> None:
                     citations,
                     latency_ms,
                     step_metrics,
+                    tool_executions,
                 ) = _stream_answer(
                     question=question,
                     history=previous_history,
@@ -218,6 +274,7 @@ def main() -> None:
                 raise ValueError("API returned an empty answer.")
             answer_placeholder.markdown(answer)
             _render_citations(citations)
+            _render_tool_executions(tool_executions)
             if latency_ms is not None:
                 st.caption(f"Thời gian xử lý: {latency_ms} ms")
             _render_step_metrics(step_metrics)
@@ -227,6 +284,7 @@ def main() -> None:
                     "content": answer,
                     "citations": citations,
                     "steps": step_metrics,
+                    "tool_executions": tool_executions,
                 }
             )
         except httpx.HTTPStatusError as error:

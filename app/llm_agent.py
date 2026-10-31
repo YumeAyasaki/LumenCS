@@ -7,8 +7,10 @@ import json
 import logging
 import re
 from collections.abc import Sequence
+from datetime import datetime
 from time import perf_counter
 from typing import Any, Literal
+from zoneinfo import ZoneInfo
 
 import httpx
 from fastembed import TextEmbedding
@@ -20,6 +22,7 @@ from app.config import Settings
 from app.tools.model_tools import (
     ModelToolContext,
     ModelToolDefinition,
+    ToolInvocationCall,
     ToolResult,
     UnknownModelToolError,
     execute_model_tool,
@@ -31,10 +34,15 @@ MAX_AGENT_STEPS: int = 10
 MAX_PARALLEL_TOOL_CALLS: int = 8
 MAX_PROVIDER_ATTEMPTS: int = 3
 MAX_RETRY_DELAY_SECONDS: float = 5.0
+VIETNAM_TIMEZONE: ZoneInfo = ZoneInfo("Asia/Ho_Chi_Minh")
 SYSTEM_PROMPT: str = """\
 You are Lumen Home's customer-support assistant. Reply in Vietnamese, politely
 (address the customer as "anh/chị", yourself as "em"). Answer first, concise
 (usually 2–5 sentences), plain text, amounts like 11.090.000 đ.
+
+TIME CONTEXT
+- Asked date in Vietnam time: {asked_date} (dd/mm/yyyy). Use this as the
+  reference date for time-sensitive answers; tools still enforce exact dates.
 
 SOURCES
 - Use only facts returned by tools in this conversation. Never invent prices,
@@ -70,6 +78,30 @@ cite_ids from this run's tool results and cover every fact you stated. Use an
 empty list for follow-up questions and refusals. Never put cite_ids in the
 answer text.
 """
+
+
+def _format_asked_date_vietnam(asked_at: str) -> str:
+    """Convert the question timestamp to a Vietnamese-local formatted date.
+
+    Args:
+        asked_at: ISO 8601 timestamp from the user request.
+
+    Returns:
+        str: Date in ``dd/mm/yyyy`` after conversion to Asia/Ho_Chi_Minh.
+
+    Raises:
+        ValueError: If ``asked_at`` is not a valid ISO 8601 timestamp.
+    """
+    normalized_timestamp: str = (
+        asked_at[:-1] + "+00:00" if asked_at.endswith("Z") else asked_at
+    )
+    try:
+        timestamp: datetime = datetime.fromisoformat(normalized_timestamp)
+    except ValueError as error:
+        raise ValueError("asked_at must be a valid ISO 8601 timestamp.") from error
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=VIETNAM_TIMEZONE)
+    return timestamp.astimezone(VIETNAM_TIMEZONE).strftime("%d/%m/%Y")
 
 
 class LLMProviderError(RuntimeError):
@@ -228,6 +260,22 @@ class AgentStepMetrics(BaseModel):
     completion_tokens: int | None = Field(default=None, ge=0)
 
 
+class AgentToolExecution(BaseModel):
+    """Expose one executed tool call and its answer to the frontend.
+
+    Attributes:
+        call_id: Provider identifier linking the request to its response.
+        call: Name and arguments of the tool invocation.
+        answer: Typed tool response, if execution succeeded.
+        error: Safe user-visible error when the tool did not execute.
+    """
+
+    call_id: str
+    call: ToolInvocationCall
+    answer: ToolResult | None = None
+    error: str | None = None
+
+
 class AgentResult(BaseModel):
     """Return a grounded answer and request usage metadata.
 
@@ -239,6 +287,7 @@ class AgentResult(BaseModel):
         tool_calls: Number of executed tool calls.
         llm_latency_ms: Cumulative provider request time.
         steps: Per-operation latency and provider-reported token counts.
+        tool_executions: Tool calls and their structured answers.
     """
 
     answer: str
@@ -248,6 +297,7 @@ class AgentResult(BaseModel):
     tool_calls: int
     llm_latency_ms: int
     steps: list[AgentStepMetrics]
+    tool_executions: list[AgentToolExecution] = Field(default_factory=list)
 
 
 def _chat_url(settings: Settings) -> str:
@@ -667,7 +717,11 @@ async def answer_question(
             f"No API key configured for provider {settings.llm_provider}."
         )
 
-    messages: list[dict[str, object]] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    asked_date: str = _format_asked_date_vietnam(asked_at)
+    system_prompt: str = SYSTEM_PROMPT.replace("{asked_date}", asked_date)
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": system_prompt}
+    ]
     messages.extend(
         {"role": message["role"], "content": message["content"]}
         for message in history
@@ -679,6 +733,7 @@ async def answer_question(
     tool_call_count: int = 0
     llm_latency_ms: int = 0
     step_metrics: list[AgentStepMetrics] = []
+    tool_executions: list[AgentToolExecution] = []
 
     for step in range(MAX_AGENT_STEPS):
         llm_started_at: float = perf_counter()
@@ -762,6 +817,25 @@ async def answer_question(
                         0,
                     )
                 result, tool_error, duration_ms = mapped_results[call.id]
+                try:
+                    displayed_arguments: dict[str, object] | str = (
+                        _decode_tool_arguments(call)
+                    )
+                    if isinstance(displayed_arguments, dict):
+                        displayed_arguments["as_of"] = asked_at
+                except ValueError:
+                    displayed_arguments = call.function.arguments
+                tool_executions.append(
+                    AgentToolExecution(
+                        call_id=call.id,
+                        call=ToolInvocationCall(
+                            name=call.function.name,
+                            arguments=displayed_arguments,
+                        ),
+                        answer=result,
+                        error=tool_error,
+                    )
+                )
                 step_metrics.append(
                     AgentStepMetrics(
                         step=step + 1,
@@ -876,6 +950,7 @@ async def answer_question(
             tool_calls=tool_call_count,
             llm_latency_ms=llm_latency_ms,
             steps=step_metrics,
+            tool_executions=tool_executions,
         )
         logger.info(
             "LLM answer completed: provider=%s model=%s steps=%d tool_calls=%d "

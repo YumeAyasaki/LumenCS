@@ -19,6 +19,7 @@ from app.llm_agent import (
     TokenUsage,
     _complete,
     _execute_call,
+    _format_asked_date_vietnam,
     _provider_retry_delay,
     _provider_error_detail,
     answer_question,
@@ -104,6 +105,55 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
         self.session_factory: MagicMock = MagicMock()
         self.qdrant_client: MagicMock = MagicMock()
         self.embedding_model: MagicMock = MagicMock()
+
+    def test_formats_asked_date_after_vietnam_timezone_conversion(self) -> None:
+        """Use Vietnam's calendar date even when the input timestamp differs."""
+        self.assertEqual(
+            _format_asked_date_vietnam("2026-10-31T23:30:00-04:00"),
+            "01/11/2026",
+        )
+        self.assertEqual(
+            _format_asked_date_vietnam("2026-11-01T00:29:10+07:00"),
+            "01/11/2026",
+        )
+        self.assertEqual(
+            _format_asked_date_vietnam("2026-11-01T00:29:10"),
+            "01/11/2026",
+        )
+
+    async def test_includes_vietnam_asked_date_in_system_prompt(self) -> None:
+        """Send the converted asked date to the model as prompt context."""
+        completion: ChatCompletion = ChatCompletion(
+            choices=[
+                ChatChoice(
+                    message=ChatMessage(
+                        role="assistant",
+                        content='{"answer":"Đã rõ.","citations":[]}',
+                    )
+                )
+            ]
+        )
+        with patch(
+            "app.llm_agent._complete",
+            new=AsyncMock(return_value=completion),
+        ) as complete:
+            await answer_question(
+                question="Xin chào",
+                asked_at="2026-10-31T23:30:00-04:00",
+                history=[],
+                session_factory=self.session_factory,
+                qdrant_client=self.qdrant_client,
+                embedding_model=self.embedding_model,
+                settings=self.settings,
+            )
+
+        prompt_messages: list[dict[str, object]] = complete.await_args.args[1]
+        system_message: dict[str, object] = prompt_messages[0]
+        self.assertEqual(system_message["role"], "system")
+        self.assertIn(
+            "Asked date in Vietnam time: 01/11/2026 (dd/mm/yyyy)",
+            str(system_message["content"]),
+        )
 
     def test_provider_error_detail_is_actionable_and_redacted(self) -> None:
         """Extract a provider error message without exposing its API key."""
@@ -420,6 +470,20 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.prompt_tokens, 36)
         self.assertEqual(result.completion_tokens, 12)
         self.assertEqual(complete.await_count, 3)
+        self.assertEqual(len(result.tool_executions), 1)
+        self.assertEqual(result.tool_executions[0].call_id, "call-1")
+        self.assertEqual(
+            result.tool_executions[0].call.name,
+            "search_policy",
+        )
+        self.assertEqual(
+            result.tool_executions[0].call.arguments["as_of"],
+            "2026-10-29T21:00:00+07:00",
+        )
+        self.assertEqual(
+            result.tool_executions[0].answer,
+            tool_result,
+        )
         self.assertEqual(
             [(metric.kind, metric.name) for metric in result.steps],
             [

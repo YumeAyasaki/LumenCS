@@ -22,6 +22,10 @@ class StreamlitChatTests(unittest.TestCase):
             'data: {"text":"Xin chào "}\n\n'
             'event: answer\n'
             'data: {"text":"bạn"}\n\n'
+            'event: tool_calls\n'
+            'data: {"tool_executions":[{"call_id":"call-1",'
+            '"call":{"name":"quote_price","arguments":{"model":"LH-AC09N"}},'
+            '"answer":{"tool_name":"quote_price","records":[],"citations":[]}}]}\n\n'
             'event: citations\n'
             'data: ["handbook.pdf#3.2"]\n\n'
             'event: metrics\n'
@@ -47,7 +51,7 @@ class StreamlitChatTests(unittest.TestCase):
             patch("ui.streamlit_app.httpx.Client", return_value=client),
             patch.dict("os.environ", {"LUMEN_API_URL": "http://api:5000"}),
         ):
-            answer, citations, latency_ms, metrics = _stream_answer(
+            answer, citations, latency_ms, metrics, executions = _stream_answer(
                 question="Xin chào",
                 history=[{"role": "assistant", "content": "Chào bạn"}],
             )
@@ -57,6 +61,9 @@ class StreamlitChatTests(unittest.TestCase):
         self.assertEqual(latency_ms, 125)
         self.assertEqual(metrics[0]["duration_ms"], 100)
         self.assertEqual(metrics[0]["prompt_tokens"], 10)
+        self.assertEqual(executions[0]["call_id"], "call-1")
+        self.assertEqual(executions[0]["call"]["name"], "quote_price")
+        self.assertEqual(executions[0]["answer"]["tool_name"], "quote_price")
         self.assertEqual(request_details["url"], "http://api:5000/ask")
         self.assertEqual(request_details["accept"], "text/event-stream")
         payload: dict[str, object] = json.loads(str(request_details["payload"]))
@@ -88,9 +95,10 @@ class StreamlitChatTests(unittest.TestCase):
             patch("ui.streamlit_app.httpx.Client", return_value=client),
             patch.dict("os.environ", {"LUMEN_API_URL": "http://api:5000"}),
         ):
-            answer, _, _, metrics = _stream_answer("Xin chào", [])
+            answer, _, _, metrics, executions = _stream_answer("Xin chào", [])
 
         self.assertEqual(answer, "Không có số liệu token.")
+        self.assertEqual(executions, [])
         self.assertNotIn("prompt_tokens", metrics[0])
         self.assertNotIn("completion_tokens", metrics[0])
 

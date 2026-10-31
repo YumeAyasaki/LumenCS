@@ -32,6 +32,7 @@ from app.config import Settings
 from app.llm_agent import (
     AgentResult,
     AgentStepMetrics,
+    AgentToolExecution,
     LLMConfigurationError,
     LLMProviderError,
     answer_question,
@@ -40,7 +41,9 @@ from app.tools.ingest import IngestAllResult, ingest_all_sources
 from app.tools.model_tools import (
     ModelToolContext,
     ModelToolDefinition,
+    ToolInvocationCall,
     ToolInvocationRequest,
+    ToolInvocationResponse,
     ToolResult,
     UnknownModelToolError,
     execute_model_tool,
@@ -143,6 +146,7 @@ class AskResponse(BaseModel):
         citations: Source identifiers supporting the answer.
         latency_ms: Time spent handling the request, in milliseconds.
         steps: Per-operation timing and provider-reported token counts.
+        tool_executions: Tool calls and their structured answers.
 
     Raises:
         ValidationError: If any response field is invalid.
@@ -152,6 +156,7 @@ class AskResponse(BaseModel):
     citations: list[str]
     latency_ms: int = Field(ge=0)
     steps: list[AgentStepMetrics] = Field(default_factory=list)
+    tool_executions: list[AgentToolExecution] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):
@@ -304,16 +309,28 @@ async def ask(
         citations=agent_result.citations,
         latency_ms=latency_ms,
         steps=agent_result.steps,
+        tool_executions=agent_result.tool_executions,
     )
     if "text/event-stream" in request.headers.get("accept", "").lower():
         async def event_stream() -> AsyncIterator[str]:
-            """Yield answer text, citations, step metrics, and completion data.
+            """Yield tool calls, answer text, citations, metrics, and completion.
 
             Yields:
-                str: Server-sent events containing answer chunks, citations,
-                    per-step metrics, and request timing.
+                str: Server-sent events containing tool calls and answers,
+                    answer chunks, citations, per-step metrics, and request
+                    timing.
             """
             chunk_size: int = 32
+            tool_event: str = json.dumps(
+                {
+                    "tool_executions": [
+                        execution.model_dump(mode="json", exclude_none=True)
+                        for execution in ask_response.tool_executions
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            yield f"event: tool_calls\ndata: {tool_event}\n\n"
             for start in range(0, len(ask_response.answer), chunk_size):
                 chunk: str = ask_response.answer[start : start + chunk_size]
                 event_data: str = json.dumps(
@@ -359,12 +376,12 @@ async def list_model_tools() -> list[ModelToolDefinition]:
     return get_model_tool_definitions()
 
 
-@app.post("/tools/{tool_name}", response_model=ToolResult)
+@app.post("/tools/{tool_name}", response_model=ToolInvocationResponse)
 async def invoke_model_tool(
     tool_name: str,
     body: ToolInvocationRequest,
     request: Request,
-) -> ToolResult:
+) -> ToolInvocationResponse:
     """Execute one validated data or utility tool for an agent.
 
     Args:
@@ -374,7 +391,7 @@ async def invoke_model_tool(
         request: Application state containing database and policy clients.
 
     Returns:
-        ToolResult: Typed records and only citations returned by this call.
+        ToolInvocationResponse: Call arguments and typed answer records.
 
     Raises:
         HTTPException: With status 404 for an unknown tool, 422 for invalid
@@ -420,7 +437,10 @@ async def invoke_model_tool(
         len(result.records),
         len(result.citations),
     )
-    return result
+    return ToolInvocationResponse(
+        call=ToolInvocationCall(name=tool_name, arguments=body.arguments),
+        answer=result,
+    )
 
 
 @app.post("/ingest", response_model=IngestAllResult)
