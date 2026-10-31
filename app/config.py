@@ -32,6 +32,7 @@ class Settings(BaseModel):
         llm_model: Provider model identifier.
         llm_base_url: OpenAI-compatible API base URL.
         llm_api_key: Optional secret API credential.
+        llm_read_timeout_seconds: Maximum wait for provider response data.
         llm_input_cost_per_million: Optional input-token price in USD.
         llm_output_cost_per_million: Optional output-token price in USD.
 
@@ -47,9 +48,10 @@ class Settings(BaseModel):
         "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     )
     llm_provider: LLMProvider = "gemini"
-    llm_model: str = "gemini-2.5-flash"
+    llm_model: str = "gemini-3.6-flash"
     llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     llm_api_key: SecretStr | None = None
+    llm_read_timeout_seconds: float = Field(default=180.0, gt=0, le=600)
     llm_input_cost_per_million: Decimal | None = Field(default=None, ge=0)
     llm_output_cost_per_million: Decimal | None = Field(default=None, ge=0)
 
@@ -89,7 +91,7 @@ class Settings(BaseModel):
             default_llm_base_url: str = (
                 "https://generativelanguage.googleapis.com/v1beta/openai"
             )
-            default_llm_model: str = "gemini-2.5-flash"
+            default_llm_model: str = "gemini-3.6-flash"
             provider_key: str | None = os.getenv("GEMINI_KEY")
         elif llm_provider_value == "openai":
             llm_provider = "openai"
@@ -124,6 +126,9 @@ class Settings(BaseModel):
                 SecretStr(os.getenv("LLM_API_KEY") or provider_key or "")
                 if (os.getenv("LLM_API_KEY") or provider_key or "").strip()
                 else None
+            ),
+            llm_read_timeout_seconds=float(
+                os.getenv("LLM_READ_TIMEOUT_SECONDS", "180")
             ),
             llm_input_cost_per_million=(
                 Decimal(input_cost) if input_cost and input_cost.strip() else None

@@ -19,9 +19,10 @@ services:
       QDRANT_COLLECTION: ${QDRANT_COLLECTION:-policy_documents}
       PDF_EMBEDDING_MODEL: ${PDF_EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
       LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
-      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_MODEL: ${LLM_MODEL:-gemini-3.6-flash}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_READ_TIMEOUT_SECONDS: ${LLM_READ_TIMEOUT_SECONDS:-180}
       GEMINI_KEY: ${GEMINI_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       LLM_INPUT_COST_PER_MILLION_USD: ${LLM_INPUT_COST_PER_MILLION_USD:-}
@@ -32,6 +33,19 @@ services:
       postgres:
         condition: service_healthy
       qdrant:
+        condition: service_started
+    restart: unless-stopped
+
+  streamlit:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    environment:
+      LUMEN_API_URL: http://app:5000
+    ports:
+      - "127.0.0.1:${STREAMLIT_PORT:-8501}:8501"
+    depends_on:
+      app:
         condition: service_started
     restart: unless-stopped
 

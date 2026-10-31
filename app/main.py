@@ -268,10 +268,10 @@ async def ask(
             detail="The LLM provider is not configured.",
         ) from error
     except LLMProviderError as error:
-        logger.exception("LLM answer generation failed")
+        logger.error("LLM answer generation failed: %s", error)
         raise HTTPException(
             status_code=502,
-            detail="The answer provider is temporarily unavailable.",
+            detail=str(error),
         ) from error
     except (
         ApiException,

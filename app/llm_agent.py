@@ -30,7 +30,8 @@ from app.tools.model_tools import (
 logger: logging.Logger = logging.getLogger(__name__)
 MAX_AGENT_STEPS: int = 3
 MAX_PARALLEL_TOOL_CALLS: int = 8
-LLM_TIMEOUT_SECONDS: float = 90.0
+MAX_PROVIDER_ATTEMPTS: int = 3
+MAX_RETRY_DELAY_SECONDS: float = 5.0
 SYSTEM_PROMPT: str = """\
 You are Lumen Home's Vietnamese customer-support assistant. Answer in Vietnamese.
 You may use only facts returned by the registered source tools. Never invent
@@ -86,6 +87,8 @@ class ChatFunction(BaseModel):
         ValidationError: If the provider omits either required field.
     """
 
+    model_config = ConfigDict(extra="allow")
+
     name: str
     arguments: str | dict[str, Any]
 
@@ -101,6 +104,8 @@ class ChatToolCall(BaseModel):
     Raises:
         ValidationError: If the provider call does not match this structure.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     id: str
     type: Literal["function"]
@@ -118,6 +123,8 @@ class ChatMessage(BaseModel):
     Raises:
         ValidationError: If the provider message has invalid field types.
     """
+
+    model_config = ConfigDict(extra="allow")
 
     role: str
     content: str | None = None
@@ -279,22 +286,82 @@ async def _complete(
         payload["tool_choice"] = "auto"
 
     try:
-        async with httpx.AsyncClient(timeout=LLM_TIMEOUT_SECONDS) as client:
-            response: httpx.Response = await client.post(
-                _chat_url(settings),
-                headers=_request_headers(settings),
-                json=payload,
-            )
-            response.raise_for_status()
-            return ChatCompletion.model_validate(response.json())
+        timeout: httpx.Timeout = httpx.Timeout(
+            connect=15.0,
+            read=settings.llm_read_timeout_seconds,
+            write=30.0,
+            pool=15.0,
+        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            for attempt in range(MAX_PROVIDER_ATTEMPTS):
+                try:
+                    response: httpx.Response = await client.post(
+                        _chat_url(settings),
+                        headers=_request_headers(settings),
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    return ChatCompletion.model_validate(response.json())
+                except httpx.HTTPStatusError as error:
+                    if (
+                        error.response.status_code
+                        not in (429, 500, 502, 503, 504)
+                        or attempt == MAX_PROVIDER_ATTEMPTS - 1
+                    ):
+                        raise
+                    delay_seconds: float = _provider_retry_delay(
+                        error.response,
+                        attempt,
+                    )
+                    logger.warning(
+                        "LLM provider %s returned HTTP %d; retrying attempt "
+                        "%d/%d in %.1f seconds",
+                        settings.llm_provider,
+                        error.response.status_code,
+                        attempt + 2,
+                        MAX_PROVIDER_ATTEMPTS,
+                        delay_seconds,
+                    )
+                    await asyncio.sleep(delay_seconds)
+                except (httpx.TimeoutException, httpx.NetworkError) as error:
+                    if attempt == MAX_PROVIDER_ATTEMPTS - 1:
+                        raise
+                    delay_seconds = min(
+                        0.5 * (2**attempt),
+                        MAX_RETRY_DELAY_SECONDS,
+                    )
+                    logger.warning(
+                        "LLM provider %s request failed with %s; retrying "
+                        "attempt %d/%d in %.1f seconds",
+                        settings.llm_provider,
+                        type(error).__name__,
+                        attempt + 2,
+                        MAX_PROVIDER_ATTEMPTS,
+                        delay_seconds,
+                    )
+                    await asyncio.sleep(delay_seconds)
     except httpx.HTTPStatusError as error:
+        provider_detail: str = _provider_error_detail(error.response, settings)
         logger.error(
-            "LLM provider %s returned HTTP %d",
+            "LLM provider %s returned HTTP %d: %s",
             settings.llm_provider,
             error.response.status_code,
+            provider_detail,
         )
         raise LLMProviderError(
-            f"LLM provider returned HTTP {error.response.status_code}."
+            f"LLM provider returned HTTP {error.response.status_code}: "
+            f"{provider_detail}"
+        ) from error
+    except httpx.TimeoutException as error:
+        logger.error(
+            "LLM provider %s timed out after %d attempts",
+            settings.llm_provider,
+            MAX_PROVIDER_ATTEMPTS,
+        )
+        raise LLMProviderError(
+            f"Timed out waiting for LLM provider {settings.llm_provider} after "
+            f"{MAX_PROVIDER_ATTEMPTS} attempts. Try again shortly or increase "
+            "LLM_READ_TIMEOUT_SECONDS."
         ) from error
     except httpx.HTTPError as error:
         logger.error(
@@ -312,6 +379,79 @@ async def _complete(
             type(error).__name__,
         )
         raise LLMProviderError("LLM provider returned an invalid response.") from error
+
+
+def _provider_error_detail(
+    response: httpx.Response,
+    settings: Settings,
+) -> str:
+    """Extract a short, credential-redacted provider error message.
+
+    Args:
+        response: Completed error response from the LLM provider.
+        settings: Active provider configuration, including its secret key.
+
+    Returns:
+        str: Provider error detail, or a status-based fallback.
+    """
+    try:
+        payload: Any = response.json()
+    except ValueError:
+        payload = None
+
+    detail: str = ""
+    if isinstance(payload, dict):
+        error_payload: Any = payload.get("error")
+        if isinstance(error_payload, dict):
+            provider_message: Any = error_payload.get("message")
+            if isinstance(provider_message, str):
+                detail = provider_message
+        elif isinstance(error_payload, str):
+            detail = error_payload
+        elif isinstance(payload.get("message"), str):
+            detail = str(payload["message"])
+
+    if not detail:
+        body_text: str = response.text.strip()
+        if body_text and not body_text.lower().startswith("<!doctype html"):
+            detail = body_text
+        elif response.status_code == 503:
+            detail = (
+                "Provider is temporarily unavailable after retrying; "
+                "please try again shortly."
+            )
+        else:
+            detail = (
+                f"Provider returned HTTP {response.status_code} without "
+                "a diagnostic message."
+            )
+    api_key: SecretStr | None = settings.llm_api_key
+    if api_key is not None:
+        secret_value: str = api_key.get_secret_value()
+        if secret_value:
+            detail = detail.replace(secret_value, "[redacted]")
+    return " ".join(detail.split())[:500]
+
+
+def _provider_retry_delay(response: httpx.Response, attempt: int) -> float:
+    """Choose a bounded delay before retrying a transient provider response.
+
+    Args:
+        response: Transient HTTP response from the LLM provider.
+        attempt: Zero-based index of the failed attempt.
+
+    Returns:
+        float: Delay in seconds, respecting numeric Retry-After when present.
+    """
+    retry_after: str | None = response.headers.get("Retry-After")
+    if retry_after is not None:
+        try:
+            requested_delay: float = float(retry_after)
+        except ValueError:
+            requested_delay = -1.0
+        if requested_delay >= 0:
+            return min(requested_delay, MAX_RETRY_DELAY_SECONDS)
+    return min(0.5 * (2**attempt), MAX_RETRY_DELAY_SECONDS)
 
 
 def _tool_error_message(error: Exception) -> str:

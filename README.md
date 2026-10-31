@@ -26,6 +26,17 @@ curl -X POST http://127.0.0.1:5000/ask \
 
 OpenAPI documentation is available at `http://127.0.0.1:5000/docs`.
 
+## Streamlit chat UI
+
+Start the API, databases, and Streamlit chat interface together with
+`docker compose up --build`. Open `http://127.0.0.1:8501` to chat; the UI
+connects to the API over the Compose network. Set `STREAMLIT_PORT` to change
+the host port. To run the interface locally, install the `ui` dependency group
+with `uv sync --group ui` and run
+`LUMEN_API_URL=http://127.0.0.1:5000 uv run --group ui streamlit run ui/streamlit_app.py`.
+The chat keeps its conversation in the Streamlit session, shows returned source
+citations, and sends the local current time as `asked_at`.
+
 ## Agent tools
 
 `GET /tools` returns model-ready function declarations with JSON schemas.
@@ -49,7 +60,8 @@ returned by a tool.
 
 ## LLM providers
 
-The default provider is Gemini's OpenAI-compatible chat-completions endpoint.
+The default provider is Gemini's OpenAI-compatible chat-completions endpoint
+using `gemini-3.6-flash`.
 Put `GEMINI_KEY` in the local `.env` file (which is gitignored), then run the
 server normally. Set `LLM_PROVIDER=openai` and `OPENAI_API_KEY` to use OpenAI.
 For other compatible services, set `LLM_PROVIDER=openai-compatible`,
@@ -57,7 +69,10 @@ For other compatible services, set `LLM_PROVIDER=openai-compatible`,
 Optional `LLM_INPUT_COST_PER_MILLION_USD` and
 `LLM_OUTPUT_COST_PER_MILLION_USD` values enable estimated cost logging. Token
 counts and per-stage timings are logged without logging credentials or prompts.
-The same environment settings can be used with Docker Compose.
+Provider response reads time out after 180 seconds by default and retry
+transient timeouts up to three attempts. Set `LLM_READ_TIMEOUT_SECONDS` from
+1 to 600 to change that limit; the Streamlit client allows up to ten minutes
+for an answer. The same environment settings can be used with Docker Compose.
 
 `POST /ingest` processes the configured `DATA_DIR` in one request. It stores
 Excel workbook rows in PostgreSQL and embeds clause-level PDF chunks into a

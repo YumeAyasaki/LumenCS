@@ -6,6 +6,8 @@ import os
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
+
 from app.config import Settings
 from app.llm_agent import (
     ChatChoice,
@@ -13,8 +15,12 @@ from app.llm_agent import (
     ChatFunction,
     ChatMessage,
     ChatToolCall,
+    LLMProviderError,
     TokenUsage,
+    _complete,
     _execute_call,
+    _provider_retry_delay,
+    _provider_error_detail,
     answer_question,
 )
 from app.tools.model_tools import ToolResult
@@ -38,7 +44,8 @@ class LLMConfigurationTests(unittest.TestCase):
             settings: Settings = Settings.from_environment()
 
         self.assertEqual(settings.llm_provider, "gemini")
-        self.assertEqual(settings.llm_model, "gemini-2.5-flash")
+        self.assertEqual(settings.llm_model, "gemini-3.6-flash")
+        self.assertEqual(settings.llm_read_timeout_seconds, 180.0)
         self.assertEqual(
             settings.llm_base_url,
             "https://generativelanguage.googleapis.com/v1beta/openai",
@@ -97,6 +104,182 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
         self.session_factory: MagicMock = MagicMock()
         self.qdrant_client: MagicMock = MagicMock()
         self.embedding_model: MagicMock = MagicMock()
+
+    def test_provider_error_detail_is_actionable_and_redacted(self) -> None:
+        """Extract a provider error message without exposing its API key."""
+        secret: str = "sensitive-test-key"
+        settings: Settings = Settings(
+            database_url="postgresql+asyncpg://user:pass@localhost/lumen",
+            qdrant_url="http://localhost:6333",
+            llm_provider="gemini",
+            llm_model="gemini-3.6-flash",
+            llm_base_url=(
+                "https://generativelanguage.googleapis.com/v1beta/openai"
+            ),
+            llm_api_key=secret,
+        )
+        response: httpx.Response = httpx.Response(
+            status_code=404,
+            json={
+                "error": {
+                    "message": f"Model unavailable for key {secret}",
+                }
+            },
+        )
+
+        detail: str = _provider_error_detail(response, settings)
+
+        self.assertEqual(
+            detail,
+            "Model unavailable for key [redacted]",
+        )
+
+    def test_provider_503_without_body_gets_actionable_message(self) -> None:
+        """Explain that an empty provider 503 is transient."""
+        response: httpx.Response = httpx.Response(status_code=503)
+
+        detail: str = _provider_error_detail(response, self.settings)
+
+        self.assertIn("temporarily unavailable", detail)
+        self.assertIn("try again shortly", detail)
+
+    def test_retry_delay_respects_retry_after_with_a_safe_cap(self) -> None:
+        """Honor a numeric retry hint without waiting unboundedly."""
+        response: httpx.Response = httpx.Response(
+            status_code=503,
+            headers={"Retry-After": "30"},
+        )
+
+        self.assertEqual(_provider_retry_delay(response, attempt=0), 5.0)
+        self.assertEqual(
+            _provider_retry_delay(httpx.Response(status_code=503), attempt=1),
+            1.0,
+        )
+
+    async def test_complete_retries_transient_provider_503(self) -> None:
+        """Retry a transient 503 once before accepting a successful response."""
+        error_response: httpx.Response = httpx.Response(
+            status_code=503,
+            request=httpx.Request(
+                "POST",
+                "http://localhost:8000/v1/chat/completions",
+            ),
+        )
+        successful_response: httpx.Response = httpx.Response(
+            status_code=200,
+            request=httpx.Request(
+                "POST",
+                "http://localhost:8000/v1/chat/completions",
+            ),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                '{"answer":"Tôi có thể giúp.",'
+                                '"citations":[]}'
+                            ),
+                        }
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 3,
+                    "completion_tokens": 4,
+                },
+            },
+        )
+        mock_client: MagicMock = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(
+            side_effect=[error_response, successful_response]
+        )
+        with (
+            patch("app.llm_agent.httpx.AsyncClient", return_value=mock_client),
+            patch("app.llm_agent.asyncio.sleep", new=AsyncMock()) as sleep,
+        ):
+            result = await _complete(
+                self.settings,
+                messages=[{"role": "user", "content": "Xin chào"}],
+                allow_tools=False,
+            )
+
+        self.assertEqual(result.choices[0].message.content, '{"answer":"Tôi có thể giúp.","citations":[]}')
+        self.assertEqual(mock_client.post.await_count, 2)
+        sleep.assert_awaited_once_with(0.5)
+
+    async def test_complete_retries_read_timeout(self) -> None:
+        """Retry a provider read timeout before returning a successful answer."""
+        successful_response: httpx.Response = httpx.Response(
+            status_code=200,
+            request=httpx.Request(
+                "POST",
+                "http://localhost:8000/v1/chat/completions",
+            ),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                '{"answer":"Tôi có thể giúp.",'
+                                '"citations":[]}'
+                            ),
+                        }
+                    }
+                ],
+            },
+        )
+        mock_client: MagicMock = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(
+            side_effect=[
+                httpx.ReadTimeout("provider response timed out"),
+                successful_response,
+            ]
+        )
+        with (
+            patch("app.llm_agent.httpx.AsyncClient", return_value=mock_client),
+            patch("app.llm_agent.asyncio.sleep", new=AsyncMock()) as sleep,
+        ):
+            result = await _complete(
+                self.settings,
+                messages=[{"role": "user", "content": "Xin chào"}],
+                allow_tools=False,
+            )
+
+        self.assertEqual(
+            result.choices[0].message.content,
+            '{"answer":"Tôi có thể giúp.","citations":[]}',
+        )
+        self.assertEqual(mock_client.post.await_count, 2)
+        sleep.assert_awaited_once_with(0.5)
+
+    async def test_complete_reports_read_timeout_after_all_attempts(self) -> None:
+        """Return a clear error if provider read timeouts persist."""
+        mock_client: MagicMock = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(
+            side_effect=httpx.ReadTimeout("provider response timed out")
+        )
+        with (
+            patch("app.llm_agent.httpx.AsyncClient", return_value=mock_client),
+            patch("app.llm_agent.asyncio.sleep", new=AsyncMock()),
+        ):
+            with self.assertRaisesRegex(
+                LLMProviderError,
+                "Timed out waiting for LLM provider",
+            ):
+                await _complete(
+                    self.settings,
+                    messages=[{"role": "user", "content": "Xin chào"}],
+                    allow_tools=False,
+                )
+
+        self.assertEqual(mock_client.post.await_count, 3)
 
     async def test_tool_call_uses_request_timestamp(self) -> None:
         """Override model-supplied as_of with the request timestamp."""
@@ -217,6 +400,91 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.prompt_tokens, 36)
         self.assertEqual(result.completion_tokens, 12)
         self.assertEqual(complete.await_count, 3)
+
+    async def test_preserves_provider_tool_signature_for_followup_request(self) -> None:
+        """Echo Gemini thought signatures with the original assistant call."""
+        signature: str = "opaque-provider-signature"
+        completion_with_tool: ChatCompletion = ChatCompletion.model_validate(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "tool_calls": [
+                                {
+                                    "id": "call-with-signature",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "search_policy",
+                                        "arguments": (
+                                            '{"as_of":"1900-01-01T00:00:00Z",'
+                                            '"question":"warranty"}'
+                                        ),
+                                    },
+                                    "extra_content": {
+                                        "google": {
+                                            "thought_signature": signature,
+                                        }
+                                    },
+                                }
+                            ],
+                        }
+                    }
+                ]
+            }
+        )
+        final_completion: ChatCompletion = ChatCompletion(
+            choices=[
+                ChatChoice(
+                    message=ChatMessage(
+                        role="assistant",
+                        content='{"answer":"Có bảo hành.","citations":[]}',
+                    )
+                )
+            ]
+        )
+        call: ChatToolCall = (
+            completion_with_tool.choices[0].message.tool_calls[0]
+        )
+        tool_result: ToolResult = ToolResult(
+            tool_name="search_policy",
+            records=[],
+            citations=[],
+        )
+        with (
+            patch(
+                "app.llm_agent._complete",
+                new=AsyncMock(
+                    side_effect=[completion_with_tool, final_completion]
+                ),
+            ) as complete,
+            patch(
+                "app.llm_agent._execute_call",
+                new=AsyncMock(return_value=(call, tool_result, None)),
+            ),
+        ):
+            result = await answer_question(
+                question="Chính sách bảo hành thế nào?",
+                asked_at="2026-10-29T21:00:00+07:00",
+                history=[],
+                session_factory=self.session_factory,
+                qdrant_client=self.qdrant_client,
+                embedding_model=self.embedding_model,
+                settings=self.settings,
+            )
+
+        self.assertEqual(result.answer, "Có bảo hành.")
+        followup_messages: list[dict[str, object]] = (
+            complete.await_args_list[1].args[1]
+        )
+        assistant_tool_message: dict[str, object] = followup_messages[2]
+        forwarded_tool_calls: list[dict[str, object]] = (
+            assistant_tool_message["tool_calls"]
+        )
+        self.assertEqual(
+            forwarded_tool_calls[0]["extra_content"],
+            {"google": {"thought_signature": signature}},
+        )
 
 
 if __name__ == "__main__":
