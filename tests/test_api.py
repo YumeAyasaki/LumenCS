@@ -10,7 +10,12 @@ from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.config import Settings
-from app.llm_agent import AgentResult, LLMConfigurationError, LLMProviderError
+from app.llm_agent import (
+    AgentResult,
+    AgentStepMetrics,
+    LLMConfigurationError,
+    LLMProviderError,
+)
 from app.tools.ingest import IngestAllResult
 from app.tools.pdf_ingester import PDFIngestionResult
 from app.tools.spreadsheet_ingester import IngestionResult
@@ -141,7 +146,16 @@ class ApiTests(unittest.TestCase):
             completion_tokens=25,
             tool_calls=1,
             llm_latency_ms=150,
-            estimated_cost_usd=None,
+            steps=[
+                AgentStepMetrics(
+                    step=1,
+                    kind="llm",
+                    name="answer",
+                    duration_ms=150,
+                    prompt_tokens=100,
+                    completion_tokens=25,
+                )
+            ],
         )
         with patch(
             "app.main.answer_question",
@@ -160,10 +174,24 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             set(response.json()),
-            {"answer", "citations", "latency_ms"},
+            {
+                "answer",
+                "citations",
+                "latency_ms",
+                "steps",
+            },
         )
         self.assertEqual(response.json()["answer"], result.answer)
         self.assertEqual(response.json()["citations"], ["policy_handbook.pdf#3.2"])
+        self.assertEqual(response.json()["steps"][0]["name"], "answer")
+        self.assertEqual(
+            response.json()["steps"][0]["duration_ms"],
+            150,
+        )
+        self.assertEqual(response.json()["steps"][0]["prompt_tokens"], 100)
+        self.assertEqual(response.json()["steps"][0]["completion_tokens"], 25)
+        self.assertNotIn("estimated_cost_usd", response.json())
+        self.assertNotIn("estimated_cost_usd", response.json()["steps"][0])
         self.assertGreaterEqual(response.json()["latency_ms"], 0)
         answer_question.assert_awaited_once()
         self.assertEqual(
@@ -222,7 +250,16 @@ class ApiTests(unittest.TestCase):
             completion_tokens=5,
             tool_calls=1,
             llm_latency_ms=25,
-            estimated_cost_usd=None,
+            steps=[
+                AgentStepMetrics(
+                    step=1,
+                    kind="llm",
+                    name="answer",
+                    duration_ms=25,
+                    prompt_tokens=10,
+                    completion_tokens=5,
+                )
+            ],
         )
         with patch(
             "app.main.answer_question",
@@ -243,7 +280,49 @@ class ApiTests(unittest.TestCase):
         self.assertIn("event: answer", response.text)
         self.assertIn("event: citations", response.text)
         self.assertIn('["handbook.pdf#3.2"]', response.text)
+        self.assertIn("event: metrics", response.text)
+        self.assertIn('"name": "answer"', response.text)
+        self.assertNotIn("estimated_cost_usd", response.text)
         self.assertIn("event: done", response.text)
+
+    def test_ask_omits_token_counts_when_provider_does_not_report_them(self) -> None:
+        """Omit unavailable token fields instead of returning zero estimates."""
+        result: AgentResult = AgentResult(
+            answer="Chào bạn.",
+            citations=[],
+            prompt_tokens=None,
+            completion_tokens=None,
+            tool_calls=0,
+            llm_latency_ms=50,
+            steps=[
+                AgentStepMetrics(
+                    step=1,
+                    kind="llm",
+                    name="answer",
+                    duration_ms=50,
+                    prompt_tokens=None,
+                    completion_tokens=None,
+                )
+            ],
+        )
+        with patch(
+            "app.main.answer_question",
+            new=AsyncMock(return_value=result),
+        ):
+            response: Response = self.request(
+                "POST",
+                "/ask",
+                {
+                    "question": "Xin chào",
+                    "asked_at": "2026-10-29T21:00:00+07:00",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn("prompt_tokens", response.json())
+        self.assertNotIn("completion_tokens", response.json())
+        self.assertNotIn("prompt_tokens", response.json()["steps"][0])
+        self.assertNotIn("completion_tokens", response.json()["steps"][0])
 
     def test_ask_rejects_empty_question(self) -> None:
         """Reject a question containing only whitespace."""

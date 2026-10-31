@@ -24,6 +24,9 @@ class StreamlitChatTests(unittest.TestCase):
             'data: {"text":"bạn"}\n\n'
             'event: citations\n'
             'data: ["handbook.pdf#3.2"]\n\n'
+            'event: metrics\n'
+            'data: {"steps":[{"step":1,"kind":"llm","name":"answer",'
+            '"duration_ms":100,"prompt_tokens":10,"completion_tokens":4}]}\n\n'
             'event: done\n'
             'data: {"latency_ms":125}\n\n'
         )
@@ -44,7 +47,7 @@ class StreamlitChatTests(unittest.TestCase):
             patch("ui.streamlit_app.httpx.Client", return_value=client),
             patch.dict("os.environ", {"LUMEN_API_URL": "http://api:5000"}),
         ):
-            answer, citations, latency_ms = _stream_answer(
+            answer, citations, latency_ms, metrics = _stream_answer(
                 question="Xin chào",
                 history=[{"role": "assistant", "content": "Chào bạn"}],
             )
@@ -52,6 +55,8 @@ class StreamlitChatTests(unittest.TestCase):
         self.assertEqual(answer, "Xin chào bạn")
         self.assertEqual(citations, ["handbook.pdf#3.2"])
         self.assertEqual(latency_ms, 125)
+        self.assertEqual(metrics[0]["duration_ms"], 100)
+        self.assertEqual(metrics[0]["prompt_tokens"], 10)
         self.assertEqual(request_details["url"], "http://api:5000/ask")
         self.assertEqual(request_details["accept"], "text/event-stream")
         payload: dict[str, object] = json.loads(str(request_details["payload"]))
@@ -62,6 +67,33 @@ class StreamlitChatTests(unittest.TestCase):
         )
         self.assertIsNotNone(payload["asked_at"])
 
+    def test_metrics_without_token_counts_remain_missing(self) -> None:
+        """Parse durations without rendering fabricated token values."""
+        event_stream: str = (
+            'event: answer\n'
+            'data: {"text":"Không có số liệu token."}\n\n'
+            'event: metrics\n'
+            'data: {"steps":[{"step":1,"kind":"llm","name":"answer",'
+            '"duration_ms":100}]}\n\n'
+        )
+        transport: httpx.MockTransport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                status_code=200,
+                headers={"content-type": "text/event-stream"},
+                text=event_stream,
+            )
+        )
+        client: httpx.Client = httpx.Client(transport=transport)
+        with (
+            patch("ui.streamlit_app.httpx.Client", return_value=client),
+            patch.dict("os.environ", {"LUMEN_API_URL": "http://api:5000"}),
+        ):
+            answer, _, _, metrics = _stream_answer("Xin chào", [])
+
+        self.assertEqual(answer, "Không có số liệu token.")
+        self.assertNotIn("prompt_tokens", metrics[0])
+        self.assertNotIn("completion_tokens", metrics[0])
+
     def test_stream_error_response_is_readable_before_raising(self) -> None:
         """Keep provider API error details available for Streamlit."""
         def handler(request: httpx.Request) -> httpx.Response:
@@ -70,7 +102,7 @@ class StreamlitChatTests(unittest.TestCase):
                 json={
                     "detail": (
                         "LLM provider returned HTTP 404: "
-                        "models/gemini-3.6-flash was not found."
+                        "models/gemini-3.5-flash-lite was not found."
                     )
                 },
             )
@@ -85,7 +117,7 @@ class StreamlitChatTests(unittest.TestCase):
                 _stream_answer(question="Câu hỏi", history=[])
 
         self.assertIn(
-            "gemini-3.6-flash was not found",
+            "gemini-3.5-flash-lite",
             raised.exception.response.text,
         )
 

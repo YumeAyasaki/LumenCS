@@ -15,8 +15,11 @@ filtering. Final citations are restricted to IDs returned by tools in that
 request, with one retry for invalid answers or citations. It accepts a
 question, an ISO 8601 `asked_at` timestamp, and optional user/assistant
 conversation history. Requests accepting `text/event-stream` receive validated
-answer chunks followed by citation and latency events; standard requests keep
-the JSON response:
+answer chunks followed by citation, per-step metrics, and latency events;
+standard JSON responses include the same per-step data. Each LLM request and
+typed-tool call reports its duration and provider-reported token counts when
+available. Missing token counts are omitted. Parallel tool durations are
+individual elapsed times and therefore can overlap:
 
 ```sh
 curl -X POST http://127.0.0.1:5000/ask \
@@ -61,14 +64,13 @@ returned by a tool.
 ## LLM providers
 
 The default provider is Gemini's OpenAI-compatible chat-completions endpoint
-using `gemini-3.6-flash`.
+using `gemini-3.5-flash-lite`.
 Put `GEMINI_KEY` in the local `.env` file (which is gitignored), then run the
 server normally. Set `LLM_PROVIDER=openai` and `OPENAI_API_KEY` to use OpenAI.
 For other compatible services, set `LLM_PROVIDER=openai-compatible`,
 `LLM_BASE_URL`, and `LLM_MODEL`; `LLM_API_KEY` is optional for local services.
-Optional `LLM_INPUT_COST_PER_MILLION_USD` and
-`LLM_OUTPUT_COST_PER_MILLION_USD` values enable estimated cost logging. Token
-counts and per-stage timings are logged without logging credentials or prompts.
+Provider-reported input/output token counts and per-stage timings are logged
+without logging credentials or prompts. Pricing is not collected or calculated.
 Provider response reads time out after 180 seconds by default and retry
 transient timeouts up to three attempts. Set `LLM_READ_TIMEOUT_SECONDS` from
 1 to 600 to change that limit; the Streamlit client allows up to ten minutes

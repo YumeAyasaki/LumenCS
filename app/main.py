@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import (
 from app.config import Settings
 from app.llm_agent import (
     AgentResult,
+    AgentStepMetrics,
     LLMConfigurationError,
     LLMProviderError,
     answer_question,
@@ -141,6 +142,7 @@ class AskResponse(BaseModel):
         answer: Vietnamese response text.
         citations: Source identifiers supporting the answer.
         latency_ms: Time spent handling the request, in milliseconds.
+        steps: Per-operation timing and provider-reported token counts.
 
     Raises:
         ValidationError: If any response field is invalid.
@@ -149,6 +151,7 @@ class AskResponse(BaseModel):
     answer: str
     citations: list[str]
     latency_ms: int = Field(ge=0)
+    steps: list[AgentStepMetrics] = Field(default_factory=list)
 
 
 class HealthResponse(BaseModel):
@@ -224,7 +227,11 @@ async def health_check(request: Request) -> HealthResponse:
     return response
 
 
-@app.post("/ask", response_model=AskResponse)
+@app.post(
+    "/ask",
+    response_model=AskResponse,
+    response_model_exclude_none=True,
+)
 async def ask(
     body: AskRequest,
     request: Request,
@@ -296,14 +303,15 @@ async def ask(
         answer=agent_result.answer,
         citations=agent_result.citations,
         latency_ms=latency_ms,
+        steps=agent_result.steps,
     )
     if "text/event-stream" in request.headers.get("accept", "").lower():
         async def event_stream() -> AsyncIterator[str]:
-            """Yield validated answer text, then citations and completion data.
+            """Yield answer text, citations, step metrics, and completion data.
 
             Yields:
                 str: Server-sent events containing answer chunks, citations,
-                    and request timing.
+                    per-step metrics, and request timing.
             """
             chunk_size: int = 32
             for start in range(0, len(ask_response.answer), chunk_size):
@@ -318,6 +326,16 @@ async def ask(
                 ensure_ascii=False,
             )
             yield f"event: citations\ndata: {citations_event}\n\n"
+            metrics_event: str = json.dumps(
+                {
+                    "steps": [
+                        step.model_dump(mode="json", exclude_none=True)
+                        for step in ask_response.steps
+                    ],
+                },
+                ensure_ascii=False,
+            )
+            yield f"event: metrics\ndata: {metrics_event}\n\n"
             completion_event: str = json.dumps(
                 {"latency_ms": ask_response.latency_ms},
                 ensure_ascii=False,

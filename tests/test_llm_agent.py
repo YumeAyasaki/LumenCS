@@ -44,7 +44,7 @@ class LLMConfigurationTests(unittest.TestCase):
             settings: Settings = Settings.from_environment()
 
         self.assertEqual(settings.llm_provider, "gemini")
-        self.assertEqual(settings.llm_model, "gemini-3.6-flash")
+        self.assertEqual(settings.llm_model, "gemini-3.5-flash-lite")
         self.assertEqual(settings.llm_read_timeout_seconds, 180.0)
         self.assertEqual(
             settings.llm_base_url,
@@ -112,7 +112,7 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
             database_url="postgresql+asyncpg://user:pass@localhost/lumen",
             qdrant_url="http://localhost:6333",
             llm_provider="gemini",
-            llm_model="gemini-3.6-flash",
+            llm_model="gemini-3.5-flash-lite",
             llm_base_url=(
                 "https://generativelanguage.googleapis.com/v1beta/openai"
             ),
@@ -208,6 +208,26 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.choices[0].message.content, '{"answer":"Tôi có thể giúp.","citations":[]}')
         self.assertEqual(mock_client.post.await_count, 2)
         sleep.assert_awaited_once_with(0.5)
+
+    async def test_missing_provider_usage_stays_unavailable(self) -> None:
+        """Keep token fields absent when the provider omits usage data."""
+        response: ChatCompletion = ChatCompletion.model_validate(
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                '{"answer":"Tôi có thể giúp.",'
+                                '"citations":[]}'
+                            ),
+                        }
+                    }
+                ]
+            }
+        )
+
+        self.assertIsNone(response.usage)
 
     async def test_complete_retries_read_timeout(self) -> None:
         """Retry a provider read timeout before returning a successful answer."""
@@ -314,7 +334,7 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
                 settings=self.settings,
             )
 
-        self.assertEqual(result, (call, tool_result, None))
+        self.assertEqual(result[:3], (call, tool_result, None))
         arguments: dict[str, object] = execute_tool.await_args.args[1]
         self.assertEqual(arguments["as_of"], "2026-10-29T21:00:00+07:00")
 
@@ -381,7 +401,7 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
             ) as complete,
             patch(
                 "app.llm_agent._execute_call",
-                new=AsyncMock(return_value=(call, tool_result, None)),
+                new=AsyncMock(return_value=(call, tool_result, None, 12)),
             ),
         ):
             result = await answer_question(
@@ -400,6 +420,19 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.prompt_tokens, 36)
         self.assertEqual(result.completion_tokens, 12)
         self.assertEqual(complete.await_count, 3)
+        self.assertEqual(
+            [(metric.kind, metric.name) for metric in result.steps],
+            [
+                ("llm", "tool_selection"),
+                ("tool", "search_policy"),
+                ("llm", "answer"),
+                ("llm", "citation_validation_retry"),
+            ],
+        )
+        self.assertEqual(result.steps[0].prompt_tokens, 10)
+        self.assertEqual(result.steps[0].completion_tokens, 2)
+        self.assertIsNone(result.steps[1].prompt_tokens)
+        self.assertIsNone(result.steps[1].completion_tokens)
 
     async def test_preserves_provider_tool_signature_for_followup_request(self) -> None:
         """Echo Gemini thought signatures with the original assistant call."""
@@ -460,7 +493,7 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
             ) as complete,
             patch(
                 "app.llm_agent._execute_call",
-                new=AsyncMock(return_value=(call, tool_result, None)),
+                new=AsyncMock(return_value=(call, tool_result, None, 12)),
             ),
         ):
             result = await answer_question(

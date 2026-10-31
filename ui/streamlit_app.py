@@ -32,7 +32,7 @@ def _api_url() -> str:
 def _stream_answer(
     question: str,
     history: list[dict[str, str]],
-) -> tuple[str, list[str], int | None]:
+) -> tuple[str, list[str], int | None, list[dict[str, Any]]]:
     """Ask the API a question and consume its server-sent events.
 
     Args:
@@ -40,8 +40,7 @@ def _stream_answer(
         history: Earlier user and assistant messages in this chat.
 
     Returns:
-        tuple[str, list[str], int | None]: Answer text, citations, and API
-            latency in milliseconds when supplied by the API.
+        tuple: Answer text, citations, total API latency, and per-step metrics.
 
     Raises:
         httpx.HTTPError: If the API cannot be reached or returns an HTTP error.
@@ -50,6 +49,7 @@ def _stream_answer(
     answer_parts: list[str] = []
     citations: list[str] = []
     latency_ms: int | None = None
+    step_metrics: list[dict[str, Any]] = []
     event_name: str = ""
     payload: dict[str, Any] = {
         "question": question,
@@ -98,8 +98,17 @@ def _stream_answer(
                     event_latency: Any = decoded_event.get("latency_ms")
                     if isinstance(event_latency, int):
                         latency_ms = event_latency
+                elif event_name == "metrics":
+                    if not isinstance(decoded_event, dict):
+                        raise ValueError("The API returned invalid step metrics.")
+                    decoded_steps: Any = decoded_event.get("steps")
+                    if not isinstance(decoded_steps, list) or not all(
+                        isinstance(metric, dict) for metric in decoded_steps
+                    ):
+                        raise ValueError("The API returned invalid step metrics.")
+                    step_metrics = decoded_steps
 
-    return "".join(answer_parts), citations, latency_ms
+    return "".join(answer_parts), citations, latency_ms, step_metrics
 
 
 def _render_citations(citations: list[str]) -> None:
@@ -113,6 +122,36 @@ def _render_citations(citations: list[str]) -> None:
     with st.expander("Nguồn tham khảo"):
         for citation in citations:
             st.markdown(f"- `{citation}`")
+
+
+def _render_step_metrics(
+    metrics: list[dict[str, Any]],
+) -> None:
+    """Display per-step duration and token usage when reported by the LLM.
+
+    Args:
+        metrics: Per-LLM-call and per-tool metrics returned by the API.
+    """
+    if not metrics:
+        return
+    with st.expander("Chi tiết thời gian và token"):
+        for metric in metrics:
+            kind: str = "LLM" if metric.get("kind") == "llm" else "Công cụ"
+            step_number: Any = metric.get("step", "?")
+            name: Any = metric.get("name", "unknown")
+            duration_ms: Any = metric.get("duration_ms", "?")
+            prompt_tokens: Any = metric.get("prompt_tokens")
+            completion_tokens: Any = metric.get("completion_tokens")
+            token_parts: list[str] = []
+            if isinstance(prompt_tokens, int):
+                token_parts.append(f"đầu vào {prompt_tokens} token")
+            if isinstance(completion_tokens, int):
+                token_parts.append(f"đầu ra {completion_tokens} token")
+            token_label: str = " · " + ", ".join(token_parts) if token_parts else ""
+            st.markdown(
+                f"- Bước {step_number} · {kind} `{name}` — "
+                f"{duration_ms} ms{token_label}"
+            )
 
 
 def main() -> None:
@@ -143,6 +182,11 @@ def main() -> None:
                 citations_value: Any = message.get("citations", [])
                 if isinstance(citations_value, list):
                     _render_citations(citations_value)
+                metrics_value: Any = message.get("steps", [])
+                if isinstance(metrics_value, list) and all(
+                    isinstance(metric, dict) for metric in metrics_value
+                ):
+                    _render_step_metrics(metrics_value)
 
     question: str | None = st.chat_input("Bạn muốn tìm hiểu thông tin gì?")
     if question is None:
@@ -161,7 +205,12 @@ def main() -> None:
         answer_placeholder = st.empty()
         try:
             with st.spinner("Đang tìm thông tin trong tài liệu..."):
-                answer, citations, latency_ms = _stream_answer(
+                (
+                    answer,
+                    citations,
+                    latency_ms,
+                    step_metrics,
+                ) = _stream_answer(
                     question=question,
                     history=previous_history,
                 )
@@ -171,11 +220,13 @@ def main() -> None:
             _render_citations(citations)
             if latency_ms is not None:
                 st.caption(f"Thời gian xử lý: {latency_ms} ms")
+            _render_step_metrics(step_metrics)
             st.session_state.messages.append(
                 {
                     "role": "assistant",
                     "content": answer,
                     "citations": citations,
+                    "steps": step_metrics,
                 }
             )
         except httpx.HTTPStatusError as error:
