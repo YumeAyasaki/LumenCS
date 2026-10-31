@@ -4,30 +4,172 @@
       "sheets": {
         "Danh mục SP": {
           "header_rows": [4, 5],
-          "data_start_row": 6
+          "data_start_row": 6,
+          "normalization": {
+            "table": "products",
+            "fields": {
+              "model": {"column": "Mã model", "parser": "text", "required": true},
+              "name": {"column": "Tên sản phẩm", "parser": "text", "required": true},
+              "product_group": {"column": "Nhóm", "parser": "text", "required": true},
+              "specification": {"column": "Thông số kỹ thuật / Công suất / dung tích", "parser": "text"},
+              "energy_rating": {"column": "Thông số kỹ thuật / Nhãn năng lượng", "parser": "text"},
+              "dimensions": {"column": "Thông số kỹ thuật / Kích thước R×C×S (mm)", "parser": "text"},
+              "weight": {"column": "Thông số kỹ thuật / Khối lượng (kg)", "parser": "text"},
+              "status": {"column": "Trạng thái", "parser": "text"},
+              "notes": {"column": "Ghi chú", "parser": "text"}
+            }
+          }
         },
         "Bảng giá": {
           "header_rows": [4, 5],
           "data_start_row": 6,
-          "footnote_start_row": 23
+          "footnote_start_row": 23,
+          "normalization": {
+            "table": "prices",
+            "fields": {
+              "model": {"column": "Mã model", "parser": "text", "required": true},
+              "valid_from": {
+                "column": "Hiệu lực từ",
+                "parser": "date_dmy",
+                "required": true,
+                "options": {"formats": ["%d/%m/%Y", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"]}
+              }
+            },
+            "expand": {
+              "dimension_field": "region",
+              "value_field": "price",
+              "parser": "decimal",
+              "options": {"thousands_separator": ".", "decimal_separator": ","},
+              "columns": {
+                "Miền Bắc": "Giá niêm yết theo vùng (VNĐ) / Miền Bắc",
+                "Miền Trung": "Giá niêm yết theo vùng (VNĐ) / Miền Trung",
+                "Miền Nam": "Giá niêm yết theo vùng (VNĐ) / Miền Nam"
+              }
+            }
+          }
         },
         "Khuyến mãi": {
           "header_rows": [4],
-          "data_start_row": 5
+          "data_start_row": 5,
+          "normalization": {
+            "table": "promotions",
+            "fields": {
+              "code": {"column": "Mã CTKM", "parser": "text", "required": true},
+              "name": {"column": "Tên chương trình", "parser": "text", "required": true},
+              "starts_on": {
+                "column": "Từ ngày",
+                "parser": "date_dmy",
+                "required": true,
+                "options": {"formats": ["%d/%m/%Y", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"]}
+              },
+              "ends_on": {
+                "column": "Đến ngày",
+                "parser": "date_dmy",
+                "required": true,
+                "options": {"formats": ["%d/%m/%Y", "%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"]}
+              },
+              "scope_text": {"column": "Áp dụng cho", "parser": "text", "required": true},
+              "scope": {
+                "column": "Áp dụng cho",
+                "parser": "product_scope",
+                "required": true,
+                "options": {
+                  "product_pattern": "\\bLH-[A-Z0-9]*\\*?(?![A-Z0-9])",
+                  "exclude_marker": "trừ",
+                  "universal_marker": "tất cả"
+                }
+              },
+              "channel": {"column": "Kênh", "parser": "text"},
+              "promotion_type": {
+                "column": "Hình thức",
+                "parser": "promotion_type",
+                "required": true,
+                "options": {
+                  "contains": {
+                    "trả góp": "installment",
+                    "giảm %": "percentage_discount",
+                    "giảm phần trăm": "percentage_discount",
+                    "giảm tiền": "cash_discount",
+                    "quà tặng": "gift"
+                  }
+                }
+              },
+              "value_amount": {
+                "column": "Giá trị",
+                "parser": "promotion_amount",
+                "context_column": "Hình thức",
+                "options": {
+                  "thousands_separator": ".",
+                  "decimal_separator": ",",
+                  "percent_marker": "%",
+                  "installment_keyword": "trả góp",
+                  "gift_value_marker": "trị giá"
+                }
+              },
+              "value_unit": {
+                "column": "Hình thức",
+                "parser": "promotion_unit",
+                "options": {
+                  "contains": {
+                    "trả góp": "percent",
+                    "giảm %": "percent",
+                    "giảm tiền": "VND",
+                    "quà tặng": "VND"
+                  }
+                }
+              },
+              "value_details": {"column": "Giá trị", "parser": "text"},
+              "cap_amount": {
+                "column": "Giá trị",
+                "parser": "promotion_cap",
+                "options": {
+                  "thousands_separator": ".",
+                  "decimal_separator": ",",
+                  "cap_keyword": "tối đa"
+                }
+              },
+              "conditions": {"column": "Điều kiện", "parser": "text"},
+              "can_stack": {
+                "column": "Cộng dồn với CTKM khác",
+                "parser": "stacking",
+                "required": true,
+                "options": {"true_prefix": "Có", "false_prefix": "Không"}
+              },
+              "stacking_text": {"column": "Cộng dồn với CTKM khác", "parser": "text"}
+            }
+          }
         },
         "Bảo hành": {
           "header_rows": [4, 5],
           "data_start_row": 6,
-          "footnote_start_row": 11
+          "footnote_start_row": 11,
+          "normalization": {
+            "table": "warranty",
+            "fields": {
+              "product_group": {"column": "Nhóm sản phẩm", "parser": "text", "required": true},
+              "product_months": {"column": "Toàn bộ sản phẩm (tháng)", "parser": "integer", "required": true},
+              "component": {"column": "Linh kiện chính / Linh kiện", "parser": "text"},
+              "component_months": {"column": "Linh kiện chính / Thời hạn (tháng)", "parser": "integer"},
+              "exclusions": {"column": "Không bảo hành", "parser": "text"}
+            }
+          }
         },
         "Vùng giá": {
           "header_rows": [3],
           "data_start_row": 4,
-          "footnote_start_row": 14
+          "footnote_start_row": 14,
+          "normalization": {
+            "table": "regions",
+            "fields": {
+              "province": {"column": "Tỉnh/Thành phố", "parser": "text", "required": true},
+              "region": {"column": "Vùng giá", "parser": "text", "required": true}
+            }
+          }
         },
         "Giá 2025 (lưu trữ)": {
           "header_rows": [3, 4],
-          "data_start_row": 5
+          "data_start_row": 5,
+          "archive": true
         }
       }
     },
@@ -35,11 +177,80 @@
       "sheets": {
         "Trung tâm dịch vụ": {
           "header_rows": [4, 5],
-          "data_start_row": 6
+          "data_start_row": 6,
+          "normalization": {
+            "table": "service_centres",
+            "fields": {
+              "code": {"column": "Mã TT", "parser": "text", "required": true},
+              "name": {"column": "Tên trung tâm", "parser": "text", "required": true},
+              "province": {"column": "Tỉnh/Thành", "parser": "text", "required": true},
+              "district": {"column": "Quận/Huyện", "parser": "text"},
+              "address": {"column": "Địa chỉ", "parser": "text", "required": true},
+              "phone": {"column": "Điện thoại", "parser": "text"},
+              "weekday_hours": {"column": "Giờ làm việc / Thứ 2 – Thứ 7", "parser": "text"},
+              "sunday_hours": {"column": "Giờ làm việc / Chủ nhật", "parser": "text"},
+              "accepted_services": {
+                "column": "Năng lực tiếp nhận",
+                "parser": "boolean_columns",
+                "options": {"true_marker": "✓"},
+                "columns": {
+                  "Điều hòa": "Năng lực tiếp nhận / Điều hòa",
+                  "Máy giặt": "Năng lực tiếp nhận / Máy giặt",
+                  "Tủ lạnh": "Năng lực tiếp nhận / Tủ lạnh",
+                  "Lọc nước": "Năng lực tiếp nhận / Lọc nước"
+                }
+              },
+              "status": {"column": "Trạng thái", "parser": "text"},
+              "notes": {"column": "Ghi chú", "parser": "text"}
+            }
+          }
         },
         "Biểu phí dịch vụ": {
           "header_rows": [4, 5],
-          "data_start_row": 6
+          "data_start_row": 6,
+          "normalization": {
+            "table": "service_fees",
+            "fields": {
+              "code": {"column": "Mã", "parser": "text", "required": true},
+              "service": {"column": "Dịch vụ", "parser": "text", "required": true},
+              "applies_to": {
+                "column": "Áp dụng cho",
+                "parser": "comma_list",
+                "required": true,
+                "options": {"delimiter": ","}
+              },
+              "unit": {"column": "Đơn vị", "parser": "text"},
+              "fee_in_warranty": {
+                "column": "Đơn giá (VNĐ) / Trong thời hạn BH",
+                "parser": "decimal_or_null",
+                "options": {"thousands_separator": ".", "decimal_separator": ","}
+              },
+              "fee_out_of_warranty": {
+                "column": "Đơn giá (VNĐ) / Ngoài thời hạn BH",
+                "parser": "decimal_or_null",
+                "options": {"thousands_separator": ".", "decimal_separator": ","}
+              },
+              "fee_in_warranty_note": {
+                "column": "Đơn giá (VNĐ) / Trong thời hạn BH",
+                "parser": "non_numeric_text",
+                "options": {"thousands_separator": ".", "decimal_separator": ","}
+              },
+              "fee_out_of_warranty_note": {
+                "column": "Đơn giá (VNĐ) / Ngoài thời hạn BH",
+                "parser": "non_numeric_text",
+                "options": {"thousands_separator": ".", "decimal_separator": ","}
+              },
+              "notes": {"column": "Ghi chú", "parser": "text"}
+            }
+          }
+        }
+      }
+    },
+    "sample_qa*.xlsx": {
+      "sheets": {
+        "QA": {
+          "header_rows": [4],
+          "data_start_row": 5
         }
       }
     }

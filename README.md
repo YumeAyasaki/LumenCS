@@ -54,21 +54,33 @@ stopping the reader. The matching PostgreSQL ingester is
 PostgreSQL stores the spreadsheet hierarchy in three related tables:
 
 - `source_workbooks` tracks each relative source filename, SHA-256 digest, and
-  ingestion warnings.
+  schema-mapping digest, and ingestion warnings.
 - `source_sheets` stores worksheet names, visibility, column labels, notes,
   footnotes, and sheet warnings.
 - `spreadsheet_rows` stores each non-empty row's original Excel row number and
   cell values. Join the row to its sheet and workbook to recover its
   `file/sheet/row` provenance.
 
-The columns and cell values are JSONB so newly added workbook columns and
-worksheets can be ingested without changing database migrations. Re-ingesting
-unchanged files skips them by content hash; changed files replace their
-previous records atomically.
+The raw columns and cell values are JSONB so newly added workbook columns
+remain auditable without changing migrations. A normalized layer stores
+products, regional effective-dated prices, promotions, warranty terms, regions,
+service centres, and service fees. Every typed row has a `source_row_id` foreign
+key to `spreadsheet_rows`; its ORM `cite_id` resolves to the source file, sheet,
+and Excel row. The schema and parse rules for each table are reviewed in
+[`app/schema_mapping.json`](app/schema_mapping.json). Archive sheets remain in
+the raw layer and are never normalized.
+
+The database query helpers in [normalized_data.py](app/tools/normalized_data.py)
+select typed models only and eager-load raw provenance for citations. After
+updating field mappings or parsers, call
+`renormalize_spreadsheet_rows(session_factory)` to rebuild typed rows from
+persisted raw data without reopening workbooks. Normal ingestion skips a
+workbook only when both the workbook and mapping hashes match; changed workbook
+records are replaced atomically.
 
 The application connects to PostgreSQL using `DATABASE_URL` and to Qdrant using
 `QDRANT_URL`. `GET /health` checks both stores and returns HTTP 503 if either
-is unavailable. Alembic migrations run with `uv run alembic upgrade head`;
+is unavailable. Alembic migrations run with `uv run alembic upgrade head`.
 `make ingest DATA=<dir>` imports the mapped Excel files from the chosen
 directory and indexes PDFs in Qdrant. Set `DATABASE_URL` to a reachable
 PostgreSQL instance and `QDRANT_URL` to a reachable Qdrant instance when

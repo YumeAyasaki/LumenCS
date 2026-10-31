@@ -5,7 +5,7 @@ from __future__ import annotations
 import fnmatch
 from datetime import date, datetime, time
 from pathlib import Path
-from typing import TypeAlias
+from typing import Literal, TypeAlias
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
@@ -15,6 +15,238 @@ from pydantic import ValidationError
 
 DEFAULT_MAPPING_PATH: Path = Path(__file__).parents[1] / "schema_mapping.json"
 ExcelValue: TypeAlias = str | int | float | bool | None
+NormalizedTable: TypeAlias = Literal[
+    "products",
+    "prices",
+    "promotions",
+    "warranty",
+    "regions",
+    "service_centres",
+    "service_fees",
+]
+NormalizationParser: TypeAlias = Literal[
+    "text",
+    "decimal",
+    "decimal_or_null",
+    "non_numeric_text",
+    "integer",
+    "date_dmy",
+    "months",
+    "comma_list",
+    "product_scope",
+    "promotion_type",
+    "promotion_amount",
+    "promotion_unit",
+    "promotion_cap",
+    "stacking",
+    "boolean_columns",
+]
+
+NORMALIZED_FIELDS: dict[str, set[str]] = {
+    "products": {
+        "model",
+        "name",
+        "product_group",
+        "specification",
+        "energy_rating",
+        "dimensions",
+        "weight",
+        "status",
+        "notes",
+    },
+    "prices": {"model", "valid_from", "region", "price"},
+    "promotions": {
+        "code",
+        "name",
+        "starts_on",
+        "ends_on",
+        "scope_text",
+        "scope",
+        "channel",
+        "promotion_type",
+        "value_amount",
+        "value_unit",
+        "value_details",
+        "cap_amount",
+        "conditions",
+        "can_stack",
+        "stacking_text",
+    },
+    "warranty": {
+        "product_group",
+        "product_months",
+        "component",
+        "component_months",
+        "exclusions",
+    },
+    "regions": {"province", "region"},
+    "service_centres": {
+        "code",
+        "name",
+        "province",
+        "district",
+        "address",
+        "phone",
+        "weekday_hours",
+        "sunday_hours",
+        "accepted_services",
+        "status",
+        "notes",
+    },
+    "service_fees": {
+        "code",
+        "service",
+        "applies_to",
+        "unit",
+        "fee_in_warranty",
+        "fee_out_of_warranty",
+        "fee_in_warranty_note",
+        "fee_out_of_warranty_note",
+        "notes",
+    },
+}
+NORMALIZED_FIELD_PARSERS: dict[str, dict[str, set[str]]] = {
+    "products": {
+        field: {"text"}
+        for field in NORMALIZED_FIELDS["products"]
+    },
+    "prices": {
+        "model": {"text"},
+        "valid_from": {"date_dmy"},
+    },
+    "promotions": {
+        "code": {"text"},
+        "name": {"text"},
+        "starts_on": {"date_dmy"},
+        "ends_on": {"date_dmy"},
+        "scope_text": {"text"},
+        "scope": {"product_scope"},
+        "channel": {"text"},
+        "promotion_type": {"promotion_type"},
+        "value_amount": {"promotion_amount"},
+        "value_unit": {"promotion_unit"},
+        "value_details": {"text"},
+        "cap_amount": {"promotion_cap"},
+        "conditions": {"text"},
+        "can_stack": {"stacking"},
+        "stacking_text": {"text"},
+    },
+    "warranty": {
+        "product_group": {"text"},
+        "product_months": {"integer", "months"},
+        "component": {"text"},
+        "component_months": {"integer", "months"},
+        "exclusions": {"text"},
+    },
+    "regions": {"province": {"text"}, "region": {"text"}},
+    "service_centres": {
+        field: {"text"}
+        for field in NORMALIZED_FIELDS["service_centres"] - {"accepted_services"}
+    }
+    | {"accepted_services": {"boolean_columns"}},
+    "service_fees": {
+        "code": {"text"},
+        "service": {"text"},
+        "applies_to": {"comma_list"},
+        "unit": {"text"},
+        "fee_in_warranty": {"decimal_or_null"},
+        "fee_out_of_warranty": {"decimal_or_null"},
+        "fee_in_warranty_note": {"non_numeric_text"},
+        "fee_out_of_warranty_note": {"non_numeric_text"},
+        "notes": {"text"},
+    },
+}
+
+
+class NormalizationField(BaseModel):
+    """Map one normalized field to a raw source column and parse rule."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    column: str
+    parser: NormalizationParser = "text"
+    required: bool = False
+    context_column: str | None = None
+    columns: dict[str, str] | None = None
+    options: dict[str, str | list[str] | dict[str, str]] = Field(
+        default_factory=dict
+    )
+
+
+class NormalizationExpansion(BaseModel):
+    """Expand one source row into records for configured column dimensions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    dimension_field: str
+    value_field: str
+    parser: NormalizationParser = "decimal"
+    columns: dict[str, str]
+    options: dict[str, str | list[str] | dict[str, str]] = Field(
+        default_factory=dict
+    )
+
+
+class NormalizationMapping(BaseModel):
+    """Describe the typed table and field mappings for a worksheet."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    table: NormalizedTable
+    fields: dict[str, NormalizationField]
+    expand: NormalizationExpansion | None = None
+
+    @model_validator(mode="after")
+    def validate_field_names(self) -> NormalizationMapping:
+        """Check configured output fields against the selected typed table.
+
+        Returns:
+            The validated normalization mapping.
+
+        Raises:
+            ValueError: If a field does not exist in the typed table.
+        """
+        allowed_fields: set[str] = NORMALIZED_FIELDS[self.table]
+        unknown_fields: set[str] = set(self.fields) - allowed_fields
+        if unknown_fields:
+            fields_text: str = ", ".join(sorted(unknown_fields))
+            raise ValueError(
+                f"Unknown fields for normalized table {self.table!r}: {fields_text}"
+            )
+        incompatible_fields: list[str] = [
+            f"{field_name} ({field.parser})"
+            for field_name, field in self.fields.items()
+            if field.parser
+            not in NORMALIZED_FIELD_PARSERS[self.table][field_name]
+        ]
+        if incompatible_fields:
+            fields_text = ", ".join(sorted(incompatible_fields))
+            raise ValueError(
+                f"Parser does not match normalized table {self.table!r}: {fields_text}"
+            )
+        if self.expand is not None:
+            expansion_fields: set[str] = {
+                self.expand.dimension_field,
+                self.expand.value_field,
+            }
+            unknown_expansion_fields: set[str] = expansion_fields - allowed_fields
+            duplicate_fields: set[str] = expansion_fields & set(self.fields)
+            if unknown_expansion_fields or duplicate_fields:
+                raise ValueError(
+                    "Expanded fields must be valid table fields and must not also "
+                    "appear in fields"
+                )
+            if (
+                self.expand.dimension_field != "region"
+                or self.expand.value_field != "price"
+                or self.expand.parser != "decimal"
+            ):
+                raise ValueError(
+                    "Price expansion must map region names to decimal price values"
+                )
+        elif self.table == "prices":
+            raise ValueError("Price normalization must expand one row per region")
+        return self
 
 
 class SheetMapping(BaseModel):
@@ -35,6 +267,8 @@ class SheetMapping(BaseModel):
     header_rows: tuple[int, ...] = Field(min_length=1)
     data_start_row: int = Field(ge=1)
     footnote_start_row: int | None = Field(default=None, ge=1)
+    archive: bool = False
+    normalization: NormalizationMapping | None = None
 
     @model_validator(mode="after")
     def validate_row_order(self) -> SheetMapping:
@@ -55,6 +289,11 @@ class SheetMapping(BaseModel):
             and self.footnote_start_row <= self.data_start_row
         ):
             raise ValueError("footnote_start_row must follow data_start_row")
+        if self.archive and self.normalization is not None:
+            raise ValueError("archive worksheets cannot have a normalization mapping")
+        if self.normalization is not None and self.normalization.expand is not None:
+            if self.normalization.table != "prices":
+                raise ValueError("column expansion is currently supported for prices")
         return self
 
 
@@ -99,6 +338,8 @@ class SpreadsheetSheet(BaseModel):
     header_notes: list[SpreadsheetNote] = Field(default_factory=list)
     footnotes: list[SpreadsheetNote] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+    archive: bool = False
+    normalization: NormalizationMapping | None = Field(default=None, exclude=True)
 
 
 class SpreadsheetWorkbook(BaseModel):
@@ -427,6 +668,8 @@ def read_workbook(
                     rows=rows,
                     header_notes=header_notes,
                     footnotes=footnotes,
+                    archive=mapping.archive,
+                    normalization=mapping.normalization,
                 )
             )
     finally:
