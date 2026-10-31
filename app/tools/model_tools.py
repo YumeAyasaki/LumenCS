@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, DecimalException
 from typing import Annotated, Literal, TypeAlias
+from urllib.parse import quote
 
 from fastembed import TextEmbedding
 from pydantic import BaseModel, ConfigDict, Field
@@ -23,6 +24,7 @@ from app.database import (
     Region,
     ServiceCentre,
     ServiceFee,
+    SourceSheet,
     Warranty,
 )
 from app.tools.normalized_data import (
@@ -433,9 +435,11 @@ class PolicyRecord(CitedToolRecord):
         kind: Policy record discriminator.
         source_file: Relative PDF path.
         section_id: Clause or section anchor.
+        parent_section_id: Top-level section containing the matched clause.
         section_title: Handbook section title.
         page: One-based PDF page number.
-        text: Retrieved handbook text.
+        text: Complete section containing the matched clause.
+        section_cite_ids: Clause citations included in the expanded section.
         document_version: Handbook version, if available.
         effective_date: Handbook effective date, if available.
         cite_id: Stable policy clause citation.
@@ -447,9 +451,11 @@ class PolicyRecord(CitedToolRecord):
     kind: Literal["policy"] = "policy"
     source_file: str
     section_id: str
+    parent_section_id: str
     section_title: str
     page: int
     text: str
+    section_cite_ids: list[str]
     document_version: str | None
     effective_date: str | None
 
@@ -499,6 +505,40 @@ ToolRecord: TypeAlias = Annotated[
 ]
 
 
+class WorksheetNoteRecord(BaseModel):
+    """Represent a worksheet note or footer row with its original row citation.
+
+    Attributes:
+        source_row: Original one-based Excel row.
+        values: Non-empty cells keyed by Excel column letters.
+        cite_id: Citation for the workbook, sheet, and note row.
+    """
+
+    source_row: int
+    values: dict[str, str | int | float | bool | None]
+    cite_id: str
+
+
+class WorksheetSourceContext(BaseModel):
+    """Provide table headings and surrounding notes for worksheet results.
+
+    Attributes:
+        source_file: Relative source workbook path.
+        sheet_name: Original worksheet title.
+        cite_id: Sheet-level reference for the configured table headings.
+        columns: Flattened headers, preserving multi-row title hierarchy.
+        header_notes: Non-tabular content before the configured table headers.
+        footnotes: Non-tabular content after the table data.
+    """
+
+    source_file: str
+    sheet_name: str
+    cite_id: str
+    columns: list[str]
+    header_notes: list[WorksheetNoteRecord]
+    footnotes: list[WorksheetNoteRecord]
+
+
 class ToolResult(BaseModel):
     """Return typed records and the exact citations available to the model.
 
@@ -506,11 +546,13 @@ class ToolResult(BaseModel):
         tool_name: Name of the tool that was executed.
         records: Typed results from the corresponding source.
         citations: Unique citations attached to returned source records.
+        source_contexts: Worksheet headers and surrounding notes for source rows.
     """
 
     tool_name: str
     records: list[ToolRecord]
     citations: list[str]
+    source_contexts: list[WorksheetSourceContext] = Field(default_factory=list)
 
 
 class FunctionDefinition(BaseModel):
@@ -881,24 +923,123 @@ def _calculate_expression(expression: str) -> Decimal:
     return result
 
 
-def _make_result(name: str, records: list[ToolRecord]) -> ToolResult:
-    """Build a tool response and collect unique row citations.
+SourceEntity: TypeAlias = (
+    Product | Price | Promotion | Region | ServiceCentre | ServiceFee | Warranty
+)
+
+
+def _note_records(
+    source_file: str,
+    sheet_name: str,
+    notes: list[dict[str, object]],
+) -> list[WorksheetNoteRecord]:
+    """Convert persisted note rows into typed records with row citations.
+
+    Args:
+        source_file: Relative workbook path.
+        sheet_name: Original worksheet title.
+        notes: Raw note objects stored during workbook ingestion.
+
+    Returns:
+        list[WorksheetNoteRecord]: Notes retaining their workbook row numbers.
+    """
+    encoded_sheet: str = quote(sheet_name, safe="")
+    result: list[WorksheetNoteRecord] = []
+    for note in notes:
+        source_row: object = note.get("source_row")
+        values: object = note.get("values")
+        if not isinstance(source_row, int) or not isinstance(values, dict):
+            raise ValueError(
+                f"Invalid persisted worksheet note for {source_file} "
+                f"sheet {sheet_name!r}."
+            )
+        result.append(
+            WorksheetNoteRecord(
+                source_row=source_row,
+                values=values,
+                cite_id=(
+                    f"{source_file}#sheet={encoded_sheet}&row={source_row}"
+                ),
+            )
+        )
+    return result
+
+
+def _worksheet_contexts(
+    source_entities: list[SourceEntity],
+) -> list[WorksheetSourceContext]:
+    """Collect unique header and footer context for source worksheet rows.
+
+    Args:
+        source_entities: Normalized source rows with eager-loaded provenance.
+
+    Returns:
+        list[WorksheetSourceContext]: One full worksheet context per source
+            sheet returned by the tool.
+    """
+    contexts: dict[int, WorksheetSourceContext] = {}
+    for entity in source_entities:
+        sheet: SourceSheet = entity.source_row.sheet
+        if sheet.id in contexts:
+            continue
+        source_file: str = sheet.workbook.source_file
+        encoded_sheet: str = quote(sheet.name, safe="")
+        contexts[sheet.id] = WorksheetSourceContext(
+            source_file=source_file,
+            sheet_name=sheet.name,
+            cite_id=f"{source_file}#sheet={encoded_sheet}",
+            columns=sheet.columns or [],
+            header_notes=_note_records(
+                source_file,
+                sheet.name,
+                sheet.header_notes or [],
+            ),
+            footnotes=_note_records(
+                source_file,
+                sheet.name,
+                sheet.footnotes or [],
+            ),
+        )
+    return list(contexts.values())
+
+
+def _make_result(
+    name: str,
+    records: list[ToolRecord],
+    source_entities: list[SourceEntity] | None = None,
+) -> ToolResult:
+    """Build a tool response with row and worksheet-context citations.
 
     Args:
         name: Registered tool name.
         records: Typed result records.
+        source_entities: Optional normalized rows used to resolve worksheets.
 
     Returns:
         ToolResult: Records and citations limited to this invocation.
     """
-    citations: list[str] = list(
-        dict.fromkeys(
-            record.cite_id
-            for record in records
-            if isinstance(record, CitedToolRecord)
-        )
+    citation_values: list[str] = []
+    for record in records:
+        if isinstance(record, PolicyRecord):
+            citation_values.extend(record.section_cite_ids)
+        elif isinstance(record, CitedToolRecord):
+            citation_values.append(record.cite_id)
+    source_contexts: list[WorksheetSourceContext] = _worksheet_contexts(
+        source_entities or []
     )
-    return ToolResult(tool_name=name, records=records, citations=citations)
+    for source_context in source_contexts:
+        citation_values.append(source_context.cite_id)
+        citation_values.extend(
+            note.cite_id
+            for note in [*source_context.header_notes, *source_context.footnotes]
+        )
+    citations: list[str] = list(dict.fromkeys(citation_values))
+    return ToolResult(
+        tool_name=name,
+        records=records,
+        citations=citations,
+        source_contexts=source_contexts,
+    )
 
 
 async def execute_model_tool(
@@ -932,6 +1073,7 @@ async def execute_model_tool(
     parsed: ToolArguments = arguments_model.model_validate(arguments)
     as_of: datetime = parsed.as_of
     session: AsyncSession = context.session
+    source_entities: list[SourceEntity] = []
 
     if isinstance(parsed, ProductDetailsArguments):
         products: list[Product] = await get_products(
@@ -940,6 +1082,7 @@ async def execute_model_tool(
             model=parsed.model,
             product_group=parsed.product_group,
         )
+        source_entities = products
         records: list[ToolRecord] = [_record_from_product(item) for item in products]
     elif isinstance(parsed, QuotePriceArguments):
         regions: list[str] = []
@@ -968,6 +1111,7 @@ async def execute_model_tool(
                     )
             else:
                 prices = await get_prices(session, as_of, model=parsed.model)
+        source_entities = prices
         records = [_record_from_price(item) for item in prices]
     elif isinstance(parsed, PromotionArguments):
         promotions: list[Promotion] = await get_promotions(
@@ -976,6 +1120,7 @@ async def execute_model_tool(
             model=parsed.model,
             channel=parsed.channel,
         )
+        source_entities = promotions
         records = [
             _record_from_promotion(item)
             for item in promotions
@@ -993,12 +1138,14 @@ async def execute_model_tool(
                 warranties.extend(await get_warranty(session, as_of, group))
         else:
             warranties = await get_warranty(session, as_of)
+        source_entities = warranties
         records = [
             _record_from_warranty(item)
             for item in warranties
         ]
     elif isinstance(parsed, RegionArguments):
         mappings = await get_regions(session, as_of, province=parsed.province)
+        source_entities = mappings
         records = [_record_from_region(item) for item in mappings]
     elif isinstance(parsed, ServiceCentreArguments):
         centres: list[ServiceCentre] = await find_service_centres(
@@ -1008,6 +1155,7 @@ async def execute_model_tool(
             product_group=parsed.product_group,
             district=parsed.district,
         )
+        source_entities = centres
         records = [_record_from_centre(item) for item in centres]
     elif isinstance(parsed, ServiceFeeArguments):
         fees: list[ServiceFee] = await get_service_fees(
@@ -1017,6 +1165,7 @@ async def execute_model_tool(
             product_group=parsed.product_group,
             service_query=parsed.service_query,
         )
+        source_entities = fees
         records = [_record_from_fee(item) for item in fees]
     elif isinstance(parsed, PolicySearchArguments):
         results: list[PDFSearchResult] = await retrieve_policy_chunks(
@@ -1031,9 +1180,11 @@ async def execute_model_tool(
             PolicyRecord(
                 source_file=item.source_file,
                 section_id=item.section_id,
+                parent_section_id=item.parent_section_id,
                 section_title=item.section_title,
                 page=item.page,
                 text=item.text,
+                section_cite_ids=item.section_cite_ids,
                 document_version=item.document_version,
                 effective_date=item.effective_date,
                 cite_id=item.cite_id,
@@ -1067,4 +1218,4 @@ async def execute_model_tool(
     else:
         raise UnknownModelToolError(f"Tool arguments are not handled: {name}")
 
-    return _make_result(name, records)
+    return _make_result(name, records, source_entities)

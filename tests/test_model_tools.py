@@ -10,14 +10,24 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.database import Price, Region, SourceSheet, SourceWorkbook, SpreadsheetRow
+from app.database import (
+    Price,
+    Region,
+    SourceSheet,
+    SourceWorkbook,
+    SpreadsheetRow,
+    Warranty,
+)
 from app.tools.model_tools import (
     CalculationRecord,
     DateContextRecord,
     ModelToolContext,
     PriceRecord,
+    PolicyRecord,
     UnknownModelToolError,
+    WarrantyRecord,
     _calculate_expression,
+    _make_result,
     execute_model_tool,
     get_model_tool_definitions,
 )
@@ -96,6 +106,117 @@ class ModelToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record.result, Decimal("7191000"))
         self.assertEqual(result.citations, [])
 
+    def test_expanded_policy_section_returns_all_clause_citations(self) -> None:
+        """Expose citations for every clause included in the section text."""
+        record: PolicyRecord = PolicyRecord(
+            source_file="policy_handbook.pdf",
+            section_id="3.2",
+            parent_section_id="3",
+            section_title="3. Bảo hành",
+            page=1,
+            text="3. Bảo hành\n3.1 ...\n3.2 ...\n3.3 ...",
+            section_cite_ids=[
+                "policy_handbook.pdf#3.1",
+                "policy_handbook.pdf#3.2",
+                "policy_handbook.pdf#3.3",
+            ],
+            document_version="3.2",
+            effective_date="2026-10-01",
+            cite_id="policy_handbook.pdf#3.2",
+        )
+
+        result = _make_result("search_policy", [record])
+
+        self.assertEqual(
+            result.citations,
+            [
+                "policy_handbook.pdf#3.1",
+                "policy_handbook.pdf#3.2",
+                "policy_handbook.pdf#3.3",
+            ],
+        )
+
+    def test_warranty_result_includes_sheet_headers_and_footnotes(self) -> None:
+        """Return multi-row headers and warranty footer with its data."""
+        workbook: SourceWorkbook = SourceWorkbook(
+            source_file="product_catalog.xlsx"
+        )
+        sheet: SourceSheet = SourceSheet(
+            id=3,
+            name="Bảo hành",
+            columns=[
+                "Nhóm sản phẩm",
+                "Linh kiện chính / Linh kiện",
+                "Linh kiện chính / Thời hạn (tháng)",
+            ],
+            header_notes=[
+                {"source_row": 2, "values": {"A": "Chính sách bảo hành"}}
+            ],
+            footnotes=[
+                {"source_row": 12, "values": {"A": "Không áp dụng cho mục đích thương mại"}}
+            ],
+            workbook=workbook,
+        )
+        source_row: SpreadsheetRow = SpreadsheetRow(
+            source_row=6,
+            sheet=sheet,
+        )
+        warranty: Warranty = Warranty(
+            product_group="Điều hòa",
+            product_months=24,
+            component="Máy nén",
+            component_months=120,
+            exclusions=None,
+            source_row=source_row,
+        )
+        record: WarrantyRecord = WarrantyRecord(
+            product_group=warranty.product_group,
+            product_months=warranty.product_months,
+            component=warranty.component,
+            component_months=warranty.component_months,
+            exclusions=warranty.exclusions,
+            cite_id=warranty.cite_id,
+        )
+
+        result = _make_result("get_warranty", [record], [warranty])
+
+        self.assertEqual(len(result.source_contexts), 1)
+        source_context = result.source_contexts[0]
+        self.assertEqual(
+            source_context.columns,
+            [
+                "Nhóm sản phẩm",
+                "Linh kiện chính / Linh kiện",
+                "Linh kiện chính / Thời hạn (tháng)",
+            ],
+        )
+        self.assertEqual(
+            source_context.header_notes[0].values["A"],
+            "Chính sách bảo hành",
+        )
+        self.assertEqual(source_context.header_notes[0].source_row, 2)
+        self.assertEqual(
+            source_context.footnotes[0].values["A"],
+            "Không áp dụng cho mục đích thương mại",
+        )
+        self.assertEqual(source_context.footnotes[0].source_row, 12)
+        self.assertIn(
+            "product_catalog.xlsx#sheet=B%E1%BA%A3o%20h%C3%A0nh&row=12",
+            result.citations,
+        )
+        self.assertIn(
+            "product_catalog.xlsx#sheet=B%E1%BA%A3o%20h%C3%A0nh&row=2",
+            result.citations,
+        )
+        self.assertIn(
+            "product_catalog.xlsx#sheet=B%E1%BA%A3o%20h%C3%A0nh",
+            result.citations,
+        )
+        serialized_result: dict[str, object] = result.model_dump(mode="json")
+        serialized_contexts: object = serialized_result["source_contexts"]
+        self.assertIsInstance(serialized_contexts, list)
+        self.assertEqual(serialized_contexts[0]["footnotes"][0]["source_row"], 12)
+
     def test_calculator_rejects_code_and_division_by_zero(self) -> None:
         """Reject expressions that could execute code or fail arithmetically."""
         with self.assertRaises(ValueError):
@@ -150,10 +271,15 @@ class ModelToolTests(unittest.IsolatedAsyncioTestCase):
         record = result.records[0]
         self.assertIsInstance(record, PriceRecord)
         self.assertEqual(record.price, Decimal("7990000"))
-        self.assertEqual(
+        self.assertIn(
+            "catalog.xlsx#sheet=B%E1%BA%A3ng%20gi%C3%A1&row=18",
             result.citations,
-            ["catalog.xlsx#sheet=B%E1%BA%A3ng%20gi%C3%A1&row=18"],
         )
+        self.assertIn(
+            "catalog.xlsx#sheet=B%E1%BA%A3ng%20gi%C3%A1",
+            result.citations,
+        )
+        self.assertEqual(len(result.source_contexts), 1)
         query_regions.assert_awaited_once()
         query_prices.assert_awaited_once()
         self.assertEqual(

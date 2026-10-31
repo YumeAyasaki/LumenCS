@@ -62,10 +62,15 @@ The registry includes `get_product_details`, `quote_price`, `get_promotions`,
 `get_warranty`, `get_region`, `find_service_centres`, `get_service_fee`,
 `search_policy`, `calculate`, and `get_date_context`. Spreadsheet tools query
 normalized typed tables and return source-row citations; policy search returns
-handbook clause citations. `calculate` accepts arithmetic only and does not
-execute model-provided code. Tools are provider-neutral declarations and an
-executor used by `/ask`; the LLM cannot issue SQL or cite sources that were not
-returned by a tool.
+handbook clause citations and expands each matching clause to its complete
+section text. All clause citations included in that section are returned to
+the answer step. Spreadsheet tool results also include the source worksheet's
+flattened headers (including multi-row header titles), pre-header notes, and
+configured footer rows in `source_contexts`; sheet and note references are
+included in the tool's citation allowlist. `calculate` accepts arithmetic only
+and does not execute model-provided code. Tools are provider-neutral
+declarations and an executor used by `/ask`; the LLM cannot issue SQL or cite
+sources that were not returned by a tool.
 
 ## LLM providers
 

@@ -36,6 +36,7 @@ class PDFPolicyChunk(BaseModel):
     Attributes:
         source_file: Relative path to the original PDF.
         section_id: Numbered clause, section, bullet, or appendix identifier.
+        parent_section_id: Top-level section identifier containing this chunk.
         section_title: Parent section title from the handbook.
         page: One-based source PDF page number.
         cite_id: Source filename and clause anchor.
@@ -49,6 +50,7 @@ class PDFPolicyChunk(BaseModel):
 
     source_file: str
     section_id: str
+    parent_section_id: str
     section_title: str
     page: int = Field(ge=1)
     cite_id: str
@@ -195,6 +197,7 @@ def _policy_chunks(document: PDFDocument) -> list[PDFPolicyChunk]:
                 PDFPolicyChunk(
                     source_file=document.source_file,
                     section_id=section_id,
+                    parent_section_id=parent_section_id,
                     section_title=section_title,
                     page=current_page.page_number,
                     cite_id=f"{document.source_file}#{active_citation_id}",
@@ -231,6 +234,7 @@ def _policy_chunks(document: PDFDocument) -> list[PDFPolicyChunk]:
                 PDFPolicyChunk(
                     source_file=document.source_file,
                     section_id=table_id,
+                    parent_section_id=parent_section_id,
                     section_title=section_title,
                     page=current_page.page_number,
                     cite_id=f"{document.source_file}#{citation_id}",
