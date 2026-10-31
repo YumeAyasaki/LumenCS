@@ -9,11 +9,12 @@ uv run uvicorn app.main:app --reload
 ```
 
 The server exposes `GET /health`, `POST /ask`, and `POST /ingest`. The ask
-endpoint currently validates the request and returns a Vietnamese placeholder
-answer with an empty `citations` list; material-backed answer generation is
-not implemented yet.
-Its request body accepts a question, an ISO 8601 `asked_at` timestamp, and
-optional user/assistant conversation history:
+endpoint embeds the question and asynchronously retrieves up to three relevant
+policy excerpts from Qdrant. It returns the source text and clause citations;
+it filters out policies not yet effective at the request's `asked_at` time and
+does not use a language model to synthesize an answer. Its request body accepts
+a question, an ISO 8601 `asked_at` timestamp, and optional user/assistant
+conversation history:
 
 ```sh
 curl -X POST http://127.0.0.1:5000/ask \
@@ -24,12 +25,13 @@ curl -X POST http://127.0.0.1:5000/ask \
 OpenAPI documentation is available at `http://127.0.0.1:5000/docs`.
 
 `POST /ingest` processes the configured `DATA_DIR` in one request. It stores
-Excel workbook rows in PostgreSQL and embeds PDF page chunks into Qdrant using a
-multilingual FastEmbed model. The response includes counts, PDF warnings, and
-per-stage/total latency. Repeated calls use stable point IDs and remove stale
-PDF chunks. The model downloads on the first PDF ingestion; Compose persists
-its caches across container restarts. Configure `DATA_DIR`, `QDRANT_COLLECTION`, and
-`PDF_EMBEDDING_MODEL` with environment variables.
+Excel workbook rows in PostgreSQL and embeds clause-level PDF chunks into a
+model-specific Qdrant collection. The response includes counts, PDF warnings,
+and per-stage/total latency. Repeated calls use stable point IDs and remove
+stale chunks. The API loads the multilingual embedding model during startup.
+The Docker image downloads and includes the default model weights at build
+time, avoiding a first-request download. Configure `DATA_DIR`,
+`QDRANT_COLLECTION`, and `PDF_EMBEDDING_MODEL` with environment variables.
 
 ## Spreadsheet reader
 
@@ -97,11 +99,26 @@ remain in the result and are flagged with a warning because scanned pages may
 need OCR.
 
 The matching Qdrant ingester is [pdf_ingester.py](app/tools/pdf_ingester.py).
-It splits extracted text into overlapping chunks, stores page citation
-identifiers and source metadata with each vector, and uses the multilingual
-`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` embedding model.
-PDF text extraction uses PyMuPDF; malformed PDFs raise a parsing error rather
-than being silently skipped.
+It splits numbered clauses and bullets into distinct chunks, keeps tables
+separate with their rows preserved, and prefixes each chunk with its section
+title. Clause citations use IDs such as `policy_handbook.pdf#3.2`; the payload
+also stores the page, source and chunk SHA-256 digests, handbook version, and
+effective date. PDF text extraction uses PyMuPDF; malformed PDFs raise a
+parsing error rather than being silently skipped.
+
+The configured
+`sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2` model is
+multilingual (rather than FastEmbed's English default). Model identity is
+included in both the Qdrant collection name and point ID so changing models
+cannot mix incompatible vector spaces. To evaluate the top-three clause
+retrieval on ten Vietnamese handbook questions, run:
+
+```sh
+uv run python -m eval.evaluate_policy_retrieval
+```
+
+The current ten-question handbook set achieves Recall@3 of 10/10 with the
+configured MiniLM model.
 
 ## Docker
 
@@ -113,9 +130,8 @@ docker compose up --build
 
 The app container applies Alembic migrations and starts the API at
 `http://127.0.0.1:5000`. Call `POST /ingest` to import the configured sources.
-PostgreSQL and Qdrant use persistent Docker volumes. The placeholder `/ask`
-response is not yet backed by retrieval from these stores. If port 5000 is
-occupied, set `APP_PORT` to choose a different host port.
+PostgreSQL and Qdrant use persistent Docker volumes. If port 5000 is occupied,
+set `APP_PORT` to choose a different host port.
 
 To run only the databases, use `docker compose up -d postgres qdrant`. Their
 ports are bound to localhost (`5432`, `6333`, and `6334`). Postgres defaults

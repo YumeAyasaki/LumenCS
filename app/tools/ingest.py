@@ -64,7 +64,7 @@ async def ingest_all_sources(
 
     Args:
         session_factory: Factory for asynchronous PostgreSQL sessions.
-        qdrant_client: Connected Qdrant async client.
+        qdrant_client: Connected Qdrant synchronous client, called in a worker thread.
         data_dir: Directory containing mapped workbooks and policy PDFs.
         qdrant_collection: Dedicated collection for indexed PDF chunks.
         pdf_embedding_model: Multilingual FastEmbed model for Qdrant vectors.

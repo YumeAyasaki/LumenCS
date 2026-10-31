@@ -1,4 +1,4 @@
-"""Tests for the placeholder FastAPI endpoints."""
+"""Tests for the FastAPI endpoints."""
 
 from __future__ import annotations
 
@@ -9,6 +9,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from httpx import ASGITransport, AsyncClient, Response
 from sqlalchemy.exc import SQLAlchemyError
 
+from app.config import Settings
+from app.tools.pdf_retriever import PDFSearchResult
 from app.tools.ingest import IngestAllResult
 from app.tools.pdf_ingester import PDFIngestionResult
 from app.tools.spreadsheet_ingester import IngestionResult
@@ -16,7 +18,7 @@ from app.main import app, lifespan
 
 
 class ApiTests(unittest.TestCase):
-    """Verify API health, request validation, and placeholder response shape."""
+    """Verify API health, retrieval, ingestion, and request validation."""
 
     def setUp(self) -> None:
         """Provide mock database clients for endpoint tests."""
@@ -36,6 +38,11 @@ class ApiTests(unittest.TestCase):
         app.state.postgres_session_factory = MagicMock()
         app.state.qdrant_client = self.qdrant_client
         app.state.qdrant_sync_client = self.qdrant_sync_client
+        app.state.pdf_embedding_model = MagicMock()
+        app.state.settings = Settings(
+            database_url="postgresql+asyncpg://user:pass@localhost/lumen",
+            qdrant_url="http://localhost:6333",
+        )
 
     def request(
         self,
@@ -98,17 +105,20 @@ class ApiTests(unittest.TestCase):
         qdrant_client: MagicMock = MagicMock()
         qdrant_client.close = AsyncMock()
         qdrant_sync_client: MagicMock = MagicMock()
+        embedding_model: MagicMock = MagicMock()
 
         async def run_lifespan() -> None:
             async with lifespan(app):
                 self.assertIs(app.state.postgres_engine, postgres_engine)
                 self.assertIs(app.state.qdrant_client, qdrant_client)
                 self.assertIs(app.state.qdrant_sync_client, qdrant_sync_client)
+                self.assertIs(app.state.pdf_embedding_model, embedding_model)
 
         with (
             patch("app.main.create_async_engine", return_value=postgres_engine),
             patch("app.main.AsyncQdrantClient", return_value=qdrant_client),
             patch("app.main.QdrantClient", return_value=qdrant_sync_client),
+            patch("app.main.TextEmbedding", return_value=embedding_model),
         ):
             asyncio.run(run_lifespan())
 
@@ -116,26 +126,60 @@ class ApiTests(unittest.TestCase):
         qdrant_client.close.assert_awaited_once()
         qdrant_sync_client.close.assert_called_once()
 
-    def test_ask_returns_placeholder_response(self) -> None:
-        """Accept a valid question and return the documented response fields."""
-        response: Response = self.request(
-            "POST",
-            "/ask",
-            {
-                "question": "Chính sách bảo hành như thế nào?",
-                "asked_at": "2026-10-29T21:00:00+07:00",
-                "history": [{"role": "user", "content": "Xin chào"}],
-            },
+    def test_ask_returns_retrieved_policy_excerpts(self) -> None:
+        """Return material-backed excerpts and clause citations."""
+        result: PDFSearchResult = PDFSearchResult(
+            source_file="policy_handbook.pdf",
+            section_id="3.2",
+            section_title="3. Bảo hành",
+            page=1,
+            cite_id="policy_handbook.pdf#3.2",
+            text="3. Bảo hành\n3.2. Kích hoạt trong 45 ngày.",
+            document_version="3.2",
+            effective_date="2026-10-01",
+            score=0.82,
         )
+        with patch(
+            "app.main.retrieve_policy_chunks",
+            new=AsyncMock(return_value=[result]),
+        ):
+            response: Response = self.request(
+                "POST",
+                "/ask",
+                {
+                    "question": "Khi nào cần kích hoạt bảo hành?",
+                    "asked_at": "2026-10-29T21:00:00+07:00",
+                    "history": [{"role": "user", "content": "Xin chào"}],
+                },
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             set(response.json()),
             {"answer", "citations", "latency_ms"},
         )
-        self.assertIn("đang được phát triển", response.json()["answer"])
-        self.assertEqual(response.json()["citations"], [])
+        self.assertIn("Kích hoạt trong 45 ngày", response.json()["answer"])
+        self.assertEqual(response.json()["citations"], ["policy_handbook.pdf#3.2"])
         self.assertGreaterEqual(response.json()["latency_ms"], 0)
+
+    def test_ask_reports_no_matching_policy_excerpt(self) -> None:
+        """Avoid inventing an answer when retrieval returns no policy chunks."""
+        with patch(
+            "app.main.retrieve_policy_chunks",
+            new=AsyncMock(return_value=[]),
+        ):
+            response: Response = self.request(
+                "POST",
+                "/ask",
+                {
+                    "question": "Thông tin này có trong sổ tay không?",
+                    "asked_at": "2026-10-29T21:00:00+07:00",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("chưa tìm thấy", response.json()["answer"])
+        self.assertEqual(response.json()["citations"], [])
 
     def test_ask_rejects_empty_question(self) -> None:
         """Reject a question containing only whitespace."""
@@ -163,6 +207,7 @@ class ApiTests(unittest.TestCase):
                 page_count=12,
                 chunk_count=15,
                 removed_count=0,
+                collection_name="policy_documents_multilingual-model",
             ),
             spreadsheet_latency_ms=25,
             pdf_latency_ms=40,

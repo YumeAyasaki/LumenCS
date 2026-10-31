@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime
 from time import perf_counter
 from typing import Annotated, AsyncIterator, Literal
 
+from fastembed import TextEmbedding
 import pymupdf
 from fastapi import FastAPI, HTTPException, Request
 from httpx import HTTPError
@@ -25,6 +28,7 @@ from sqlalchemy.ext.asyncio import (
 
 from app.config import Settings
 from app.tools.ingest import IngestAllResult, ingest_all_sources
+from app.tools.pdf_retriever import PDFSearchResult, retrieve_policy_chunks
 
 logger: logging.Logger = logging.getLogger(__name__)
 
@@ -33,7 +37,7 @@ NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_len
 
 @asynccontextmanager
 async def lifespan(application: FastAPI) -> AsyncIterator[None]:
-    """Create and dispose PostgreSQL and Qdrant clients for the server lifetime.
+    """Load embeddings and create/dispose database clients for server lifetime.
 
     Args:
         application: FastAPI application receiving the client handles.
@@ -42,9 +46,14 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         None: The application runs while both configured clients are available.
 
     Raises:
-        ValueError: If required connection settings are empty.
+        ValueError: If required connection settings or model configuration are invalid.
     """
     settings: Settings = Settings.from_environment()
+    embedding_model: TextEmbedding = await asyncio.to_thread(
+        TextEmbedding,
+        model_name=settings.pdf_embedding_model,
+        cache_dir=os.getenv("FASTEMBED_CACHE_PATH"),
+    )
     postgres_engine: AsyncEngine = create_async_engine(
         settings.database_url,
         pool_pre_ping=True,
@@ -58,7 +67,12 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
     )
     application.state.qdrant_client = qdrant_client
     application.state.qdrant_sync_client = qdrant_sync_client
-    logger.info("Initialized PostgreSQL and Qdrant clients")
+    application.state.pdf_embedding_model = embedding_model
+    application.state.settings = settings
+    logger.info(
+        "Initialized PostgreSQL, Qdrant, and embedding model %s",
+        settings.pdf_embedding_model,
+    )
     try:
         yield
     finally:
@@ -140,7 +154,7 @@ class HealthResponse(BaseModel):
 
 app: FastAPI = FastAPI(
     title="Lumen Home Assistant API",
-    description="Placeholder API for the Lumen Home customer-support assistant.",
+    description="Retrieval-backed API for the Lumen Home customer-support assistant.",
     version="0.1.0",
     lifespan=lifespan,
 )
@@ -195,28 +209,60 @@ async def health_check(request: Request) -> HealthResponse:
 
 
 @app.post("/ask", response_model=AskResponse)
-async def ask(request: AskRequest) -> AskResponse:
-    """Return a placeholder answer to a customer-support question.
+async def ask(body: AskRequest, request: Request) -> AskResponse:
+    """Return source-grounded policy excerpts retrieved for a customer question.
 
     Args:
-        request (AskRequest): Question, timestamp, and optional conversation
-            history.
+        body: Question, timestamp, and optional conversation history.
+        request: Application state containing the embedding and Qdrant clients.
 
     Returns:
-        AskResponse: A placeholder response with no citations until answer
-            retrieval is implemented.
+        AskResponse: Up to three relevant Vietnamese policy excerpts and citations.
 
     Raises:
-        RequestValidationError: FastAPI returns HTTP 422 if the request body
-            fails model validation.
+        HTTPException: If Qdrant retrieval fails, with HTTP 503.
     """
     started_at: float = perf_counter()
-    logger.info("Received assistant question")
+    settings: Settings = request.app.state.settings
+    qdrant_client: AsyncQdrantClient = request.app.state.qdrant_client
+    embedding_model: TextEmbedding = request.app.state.pdf_embedding_model
+    try:
+        results: list[PDFSearchResult] = await retrieve_policy_chunks(
+            qdrant_client=qdrant_client,
+            embedding_model=embedding_model,
+            question=body.question,
+            as_of=body.asked_at,
+            base_collection_name=settings.qdrant_collection,
+            embedding_model_name=settings.pdf_embedding_model,
+        )
+    except (ApiException, HTTPError, ResponseHandlingException) as error:
+        logger.exception("Policy retrieval failed")
+        raise HTTPException(
+            status_code=503,
+            detail="Policy retrieval is temporarily unavailable.",
+        ) from error
 
+    citations: list[str] = list(dict.fromkeys(result.cite_id for result in results))
+    if results:
+        excerpts: list[str] = [
+            f"{result.cite_id}:\n{result.text}"
+            for result in results
+        ]
+        answer: str = "Các nội dung liên quan trong tài liệu:\n\n" + "\n\n".join(
+            excerpts
+        )
+    else:
+        answer = "Tôi chưa tìm thấy thông tin phù hợp trong sổ tay chính sách."
+    latency_ms: int = round((perf_counter() - started_at) * 1000)
+    logger.info(
+        "Policy retrieval completed: %d results in %d ms",
+        len(results),
+        latency_ms,
+    )
     return AskResponse(
-        answer="Tính năng trả lời tự động đang được phát triển. Vui lòng thử lại sau.",
-        citations=[],
-        latency_ms=round((perf_counter() - started_at) * 1000),
+        answer=answer,
+        citations=citations,
+        latency_ms=latency_ms,
     )
 
 
