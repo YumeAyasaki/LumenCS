@@ -6,19 +6,27 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from time import perf_counter
-from typing import Annotated, AsyncIterator, Literal
+from typing import Annotated, Literal
+from zoneinfo import ZoneInfo
 
-from fastembed import TextEmbedding
 import pymupdf
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from fastembed import TextEmbedding
 from httpx import HTTPError
+from pydantic import (
+    BaseModel,
+    Field,
+    StringConstraints,
+    ValidationError,
+    field_validator,
+)
 from qdrant_client import AsyncQdrantClient, QdrantClient
 from qdrant_client.http.exceptions import ApiException, ResponseHandlingException
-from pydantic import BaseModel, Field, StringConstraints, ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
@@ -51,6 +59,7 @@ from app.tools.model_tools import (
 )
 
 logger: logging.Logger = logging.getLogger(__name__)
+VIETNAM_TIMEZONE: ZoneInfo = ZoneInfo("Asia/Ho_Chi_Minh")
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
@@ -136,6 +145,24 @@ class AskRequest(BaseModel):
     question: NonEmptyString
     asked_at: datetime
     history: list[ConversationMessage] = Field(default_factory=list)
+
+    @field_validator("asked_at")
+    @classmethod
+    def convert_asked_at_to_vietnam_time(cls, value: datetime) -> datetime:
+        """Normalize timestamps once at the API boundary.
+
+        Args:
+            value: User-provided ISO timestamp, which may be naive.
+
+        Returns:
+            Timestamp represented in ``Asia/Ho_Chi_Minh``.
+
+        Raises:
+            ValueError: If timezone conversion cannot be performed.
+        """
+        if value.tzinfo is None:
+            return value.replace(tzinfo=VIETNAM_TIMEZONE)
+        return value.astimezone(VIETNAM_TIMEZONE)
 
 
 class AskResponse(BaseModel):
@@ -400,6 +427,13 @@ async def invoke_model_tool(
     session_factory: async_sessionmaker[AsyncSession] = (
         request.app.state.postgres_session_factory
     )
+    arguments: dict[str, object] = dict(body.arguments)
+    if "as_of" in arguments:
+        logger.info(
+            "Ignoring caller-supplied as_of for direct tool %s",
+            tool_name,
+        )
+    arguments["as_of"] = datetime.now(VIETNAM_TIMEZONE).isoformat()
     try:
         async with session_factory() as session:
             context = ModelToolContext(
@@ -410,7 +444,7 @@ async def invoke_model_tool(
             )
             result: ToolResult = await execute_model_tool(
                 tool_name,
-                body.arguments,
+                arguments,
                 context,
             )
     except UnknownModelToolError as error:
@@ -438,7 +472,7 @@ async def invoke_model_tool(
         len(result.citations),
     )
     return ToolInvocationResponse(
-        call=ToolInvocationCall(name=tool_name, arguments=body.arguments),
+        call=ToolInvocationCall(name=tool_name, arguments=arguments),
         answer=result,
     )
 

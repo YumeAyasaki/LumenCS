@@ -48,27 +48,29 @@ citations, and sends the local current time as `asked_at`.
 
 `GET /tools` returns model-ready function declarations with JSON schemas.
 Invoke a declared tool with `POST /tools/{tool_name}` and an `arguments` object;
-each tool requires the question's ISO 8601 `as_of` timestamp. Responses contain
-both `call` (the invoked name and arguments) and `answer` (the structured
-result with citations). For example:
+the server injects the effective date so it is omitted from model-facing
+schemas. Responses contain both `call` (the invoked name and arguments) and
+`answer` (the structured result with citations). For example:
 
 ```sh
 curl -X POST http://127.0.0.1:5000/tools/quote_price \
   -H 'Content-Type: application/json' \
-  -d '{"arguments":{"as_of":"2026-10-29T21:00:00+07:00","model":"LH-AC09N","province":"Hà Nội"}}'
+  -d '{"arguments":{"model":"LH-AC09N","province":"Hà Nội"}}'
 ```
 
 The registry includes `get_product_details`, `quote_price`, `get_promotions`,
-`get_warranty`, `get_region`, `find_service_centres`, `get_service_fee`,
-`search_policy`, `calculate`, and `get_date_context`. Spreadsheet tools query
-normalized typed tables and return source-row citations; policy search returns
-handbook clause citations and expands each matching clause to its complete
-section text. All clause citations included in that section are returned to
-the answer step. Spreadsheet tool results also include the source worksheet's
-flattened headers (including multi-row header titles), pre-header notes, and
-configured footer rows in `source_contexts`; sheet and note references are
-included in the tool's citation allowlist. `calculate` accepts arithmetic only
-and does not execute model-provided code. Tools are provider-neutral
+`get_warranty`, `find_service_centres`, `get_service_fee`, `search_policy`,
+`calculate`, and `add_days`. `quote_price` also returns model-matched discount
+programs, cap-aware per-program calculations, installment eligibility, and
+separate reasons for inapplicable programs. Unknown sales channels mark
+channel-limited programs conditional. Spreadsheet tools query normalized typed
+tables and return source-row citations plus compact cited worksheet notes,
+including when a lookup has no matching rows. Policy search returns handbook
+clause citations and expands each matching clause to its complete section
+text. All clause citations included in that section are returned to the answer
+step. `/ask` always searches the policy handbook with the original question
+before the LLM selects any additional tools. `calculate` accepts arithmetic
+only and does not execute model-provided code. Tools are provider-neutral
 declarations and an executor used by `/ask`; the LLM cannot issue SQL or cite
 sources that were not returned by a tool.
 
@@ -81,7 +83,8 @@ server normally. Set `LLM_PROVIDER=openai` and `OPENAI_API_KEY` to use OpenAI.
 For other compatible services, set `LLM_PROVIDER=openai-compatible`,
 `LLM_BASE_URL`, and `LLM_MODEL`; `LLM_API_KEY` is optional for local services.
 Provider-reported input/output token counts and per-stage timings are logged
-without logging credentials or prompts. Pricing is not collected or calculated.
+without logging credentials or prompts. LLM provider dollar costs are not
+estimated.
 Provider response reads time out after 180 seconds by default and retry
 transient timeouts up to three attempts. Set `LLM_READ_TIMEOUT_SECONDS` from
 1 to 600 to change that limit; the Streamlit client allows up to ten minutes

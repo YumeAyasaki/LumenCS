@@ -116,6 +116,14 @@ class NormalizedDataTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_service_fee_filters_by_name_and_product_group(self) -> None:
         """Support user-friendly fee-name search without unsafe SQL."""
+        groups_result: MagicMock = MagicMock()
+        groups_result.all.return_value = ["Điều hòa", "Máy giặt"]
+        fees_result: MagicMock = MagicMock()
+        fees_result.all.return_value = []
+        self.session.scalars = AsyncMock(
+            side_effect=[groups_result, fees_result]
+        )
+
         await get_service_fees(
             self.session,
             date(2026, 10, 28),
@@ -123,7 +131,7 @@ class NormalizedDataTests(unittest.IsolatedAsyncioTestCase):
             service_query="vệ sinh%",
         )
 
-        statement = self.session.scalars.await_args.args[0]
+        statement = self.session.scalars.await_args_list[-1].args[0]
         sql: str = str(statement.compile(compile_kwargs={"literal_binds": True}))
         self.assertIn("lower(service_fees.service) LIKE lower", sql)
         self.assertIn("ESCAPE", sql)

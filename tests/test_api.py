@@ -17,11 +17,11 @@ from app.llm_agent import (
     LLMConfigurationError,
     LLMProviderError,
 )
+from app.main import app, lifespan
 from app.tools.ingest import IngestAllResult
 from app.tools.model_tools import ToolInvocationCall, ToolResult
 from app.tools.pdf_ingester import PDFIngestionResult
 from app.tools.spreadsheet_ingester import IngestionResult
-from app.main import app, lifespan
 
 
 class ApiTests(unittest.TestCase):
@@ -185,7 +185,7 @@ class ApiTests(unittest.TestCase):
                 "/ask",
                 {
                     "question": "Khi nào cần kích hoạt bảo hành?",
-                    "asked_at": "2026-10-29T21:00:00+07:00",
+                    "asked_at": "2026-10-29T21:00:00Z",
                     "history": [{"role": "user", "content": "Xin chào"}],
                 },
             )
@@ -224,7 +224,7 @@ class ApiTests(unittest.TestCase):
         answer_question.assert_awaited_once()
         self.assertEqual(
             answer_question.await_args.kwargs["asked_at"],
-            "2026-10-29T21:00:00+07:00",
+            "2026-10-30T04:00:00+07:00",
         )
         self.assertEqual(
             answer_question.await_args.kwargs["history"],
@@ -404,6 +404,15 @@ class ApiTests(unittest.TestCase):
         self.assertIn("quote_price", names)
         self.assertIn("search_policy", names)
         self.assertIn("calculate", names)
+        self.assertNotIn("get_region", names)
+        self.assertNotIn("get_date_context", names)
+        quote_schema: dict[str, object] = next(
+            item["function"]
+            for item in definitions
+            if item["function"]["name"] == "quote_price"
+        )["parameters"]
+        self.assertNotIn("as_of", quote_schema["properties"])
+        self.assertNotIn("title", str(quote_schema))
 
     def test_invoke_model_tool(self) -> None:
         """Execute a validated model function call through the API."""
@@ -420,7 +429,6 @@ class ApiTests(unittest.TestCase):
             "/tools/calculate",
             {
                 "arguments": {
-                    "as_of": "2026-10-29T21:00:00+07:00",
                     "expression": "100 * 0.9",
                 }
             },
@@ -435,6 +443,7 @@ class ApiTests(unittest.TestCase):
             call["arguments"]["expression"],
             "100 * 0.9",
         )
+        self.assertTrue(call["arguments"]["as_of"].endswith("+07:00"))
         answer: object = payload["answer"]
         self.assertIsInstance(answer, dict)
         self.assertEqual(answer["tool_name"], "calculate")

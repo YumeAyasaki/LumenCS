@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import ast
+import fnmatch
+import logging
 import operator
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime
-from decimal import Decimal, DecimalException
+from datetime import date, datetime, timedelta
+from decimal import ROUND_HALF_UP, Decimal, DecimalException
+from functools import lru_cache
 from typing import Annotated, Literal, TypeAlias
 from urllib.parse import quote
 
 from fastembed import TextEmbedding
 from pydantic import BaseModel, ConfigDict, Field
 from qdrant_client import AsyncQdrantClient
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.config import Settings
 from app.database import (
@@ -29,18 +34,26 @@ from app.database import (
 )
 from app.tools.normalized_data import (
     find_service_centres,
+    get_prices,
     get_products,
     get_promotions,
+    get_promotions_for_model,
     get_regions,
-    get_prices,
     get_service_fees,
     get_warranty,
 )
 from app.tools.pdf_retriever import PDFSearchResult, retrieve_policy_chunks
+from app.tools.spreadsheet_reader import (
+    SchemaMapping,
+    WorkbookMapping,
+    load_schema_mapping,
+)
+
+logger: logging.Logger = logging.getLogger(__name__)
 
 
 class ToolArguments(BaseModel):
-    """Provide shared time context and strict argument validation for tools.
+    """Provide hidden server time context and typed argument validation.
 
     Attributes:
         as_of: Timestamp of the customer's question, used for effective-date
@@ -50,7 +63,7 @@ class ToolArguments(BaseModel):
         ValueError: If any declared argument is invalid.
     """
 
-    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
 
     as_of: datetime = Field(
         description="Thời điểm câu hỏi được đặt, định dạng ISO 8601."
@@ -79,6 +92,7 @@ class QuotePriceArguments(ToolArguments):
         model: Exact product model code.
         province: Optional province or city used to resolve the price region.
         region: Optional exact price region.
+        channel: Optional sales channel for promotion eligibility.
     """
 
     model: str = Field(min_length=1, description="Mã model cần báo giá.")
@@ -89,6 +103,10 @@ class QuotePriceArguments(ToolArguments):
     region: str | None = Field(
         default=None,
         description="Vùng giá chính xác nếu đã biết.",
+    )
+    channel: str | None = Field(
+        default=None,
+        description="Kênh mua hàng (ví dụ Online hoặc tại cửa hàng).",
     )
 
 
@@ -116,19 +134,6 @@ class WarrantyArguments(ToolArguments):
     product_group: str | None = Field(
         default=None,
         description="Nhóm sản phẩm chính xác.",
-    )
-
-
-class RegionArguments(ToolArguments):
-    """Describe a province-to-price-region lookup.
-
-    Attributes:
-        province: Optional exact province or city.
-    """
-
-    province: str | None = Field(
-        default=None,
-        description="Tỉnh/thành cần tra vùng giá.",
     )
 
 
@@ -198,12 +203,16 @@ class CalculateArguments(ToolArguments):
     )
 
 
-class DateContextArguments(ToolArguments):
-    """Request calendar context for the question's timestamp.
+class AddDaysArguments(ToolArguments):
+    """Request a date offset calculation.
 
     Attributes:
-        as_of: Timestamp of the customer's question.
+        start_date: Start date in ISO YYYY-MM-DD format.
+        days: Number of calendar days to add; negative values subtract days.
     """
+
+    start_date: date = Field(description="Ngày bắt đầu, định dạng YYYY-MM-DD.")
+    days: int = Field(description="Số ngày cần cộng hoặc trừ.")
 
 
 class CitedToolRecord(BaseModel):
@@ -258,9 +267,17 @@ class PriceRecord(CitedToolRecord):
     Attributes:
         kind: Price record discriminator.
         model: Catalog model code.
-        region: Price region.
-        price: Effective listed price.
+        region: Price region, if a price was found.
+        price: Effective listed price, if a price was found.
         valid_from: Date the listed price became effective.
+        product_status: Catalog status of the model.
+        product_notes: Catalog note, including replacement model details.
+        product_cite_id: Product catalog citation.
+        promotions: Applicable or conditional price reductions.
+        not_applicable: Programs excluded by date, model, or channel.
+        installment_note: Eligibility terms for applicable installments.
+        installment_cite_ids: Promotion citations supporting installment terms.
+        calculation_note: Explains that each discount is calculated alone.
         cite_id: Workbook, sheet, and source row citation.
 
     Raises:
@@ -269,9 +286,61 @@ class PriceRecord(CitedToolRecord):
 
     kind: Literal["price"] = "price"
     model: str
-    region: str
-    price: Decimal
-    valid_from: date
+    region: str | None
+    price: Decimal | None
+    valid_from: date | None
+    product_status: str | None = None
+    product_notes: str | None = None
+    product_cite_id: str | None = None
+    promotions: list[PricePromotionRecord] = Field(default_factory=list)
+    not_applicable: list[NotApplicablePromotionRecord] = Field(
+        default_factory=list
+    )
+    installment_note: str | None = None
+    installment_cite_ids: list[str] = Field(default_factory=list)
+    calculation_note: str | None = None
+
+
+class PricePromotionRecord(BaseModel):
+    """Describe one price discount and its independently calculated impact.
+
+    Attributes:
+        code: Source promotion code.
+        name: Promotion name.
+        channel: Source channel limitation, if any.
+        discount_amount: Discount after applying any source cap, if price exists.
+        price_after_discount: Listed price less this promotion only, if available.
+        conditions: Eligibility terms from the source.
+        stacking_text: Source stacking rule.
+        channel_conditional: Whether the customer channel is unknown.
+        cite_id: Promotion source citation.
+    """
+
+    code: str
+    name: str
+    channel: str | None
+    discount_amount: Decimal | None
+    price_after_discount: Decimal | None
+    conditions: str | None
+    stacking_text: str | None
+    channel_conditional: bool
+    cite_id: str
+
+
+class NotApplicablePromotionRecord(BaseModel):
+    """Explain why a promotion matching a model cannot be used.
+
+    Attributes:
+        code: Source promotion code.
+        name: Promotion name.
+        reason: Date, model-exclusion, or channel reason.
+        cite_id: Promotion source citation.
+    """
+
+    code: str
+    name: str
+    reason: str
+    cite_id: str
 
 
 class PromotionRecord(CitedToolRecord):
@@ -340,24 +409,6 @@ class WarrantyRecord(CitedToolRecord):
     component: str | None
     component_months: int | None
     exclusions: str | None
-
-
-class RegionRecord(CitedToolRecord):
-    """Represent the price-region mapping for a province.
-
-    Attributes:
-        kind: Region record discriminator.
-        province: Province or city from the source.
-        region: Mapped price region.
-        cite_id: Workbook, sheet, and source row citation.
-
-    Raises:
-        ValidationError: If returned values do not match the record schema.
-    """
-
-    kind: Literal["region"] = "region"
-    province: str
-    region: str
 
 
 class ServiceCentreRecord(CitedToolRecord):
@@ -474,19 +525,21 @@ class CalculationRecord(BaseModel):
     result: Decimal
 
 
-class DateContextRecord(BaseModel):
-    """Represent the request timestamp and its Vietnamese calendar context.
+class AddDaysRecord(BaseModel):
+    """Represent a date offset and its Vietnamese weekday.
 
     Attributes:
-        kind: Identifies this record as date context.
-        as_of: Original request timestamp.
-        local_date: Calendar date in the timestamp's own timezone.
-        weekday: Vietnamese weekday name.
+        kind: Identifies this record as a date calculation.
+        start_date: Supplied starting date.
+        days: Number of days added.
+        result_date: Resulting calendar date.
+        weekday: Vietnamese weekday name for the result.
     """
 
-    kind: Literal["date_context"] = "date_context"
-    as_of: datetime
-    local_date: str
+    kind: Literal["add_days"] = "add_days"
+    start_date: date
+    days: int
+    result_date: date
     weekday: str
 
 
@@ -495,48 +548,13 @@ ToolRecord: TypeAlias = Annotated[
     | PriceRecord
     | PromotionRecord
     | WarrantyRecord
-    | RegionRecord
     | ServiceCentreRecord
     | ServiceFeeRecord
     | PolicyRecord
     | CalculationRecord
-    | DateContextRecord,
+    | AddDaysRecord,
     Field(discriminator="kind"),
 ]
-
-
-class WorksheetNoteRecord(BaseModel):
-    """Represent a worksheet note or footer row with its original row citation.
-
-    Attributes:
-        source_row: Original one-based Excel row.
-        values: Non-empty cells keyed by Excel column letters.
-        cite_id: Citation for the workbook, sheet, and note row.
-    """
-
-    source_row: int
-    values: dict[str, str | int | float | bool | None]
-    cite_id: str
-
-
-class WorksheetSourceContext(BaseModel):
-    """Provide table headings and surrounding notes for worksheet results.
-
-    Attributes:
-        source_file: Relative source workbook path.
-        sheet_name: Original worksheet title.
-        cite_id: Sheet-level reference for the configured table headings.
-        columns: Flattened headers, preserving multi-row title hierarchy.
-        header_notes: Non-tabular content before the configured table headers.
-        footnotes: Non-tabular content after the table data.
-    """
-
-    source_file: str
-    sheet_name: str
-    cite_id: str
-    columns: list[str]
-    header_notes: list[WorksheetNoteRecord]
-    footnotes: list[WorksheetNoteRecord]
 
 
 class ToolResult(BaseModel):
@@ -546,13 +564,13 @@ class ToolResult(BaseModel):
         tool_name: Name of the tool that was executed.
         records: Typed results from the corresponding source.
         citations: Unique citations attached to returned source records.
-        source_contexts: Worksheet headers and surrounding notes for source rows.
+        notes: Compact worksheet notes in ``[cite_id] text`` form.
     """
 
     tool_name: str
     records: list[ToolRecord]
     citations: list[str]
-    source_contexts: list[WorksheetSourceContext] = Field(default_factory=list)
+    notes: list[str] = Field(default_factory=list)
 
 
 class FunctionDefinition(BaseModel):
@@ -642,43 +660,71 @@ class ModelToolContext:
 TOOL_DESCRIPTIONS: dict[str, tuple[type[ToolArguments], str]] = {
     "get_product_details": (
         ProductDetailsArguments,
-        "Tra cứu thông số, nhóm và trạng thái sản phẩm trong danh mục.",
+        (
+            "Dùng để xác minh tên, nhóm, thông số hoặc trạng thái một model; trả "
+            "về các trường trong danh mục kèm nguồn. Không gọi thêm nếu quote_price "
+            "đã trả trạng thái model."
+        ),
     ),
     "quote_price": (
         QuotePriceArguments,
-        "Tra cứu giá model theo vùng hoặc tự xác định vùng từ tỉnh/thành.",
+        (
+            "Dùng để báo giá model theo tỉnh/thành hoặc vùng; trả giá niêm yết, "
+            "khuyến mãi phù hợp, mức giảm đã tính và giá sau từng mức giảm. Không "
+            "gọi thêm công cụ khuyến mãi cho cùng yêu cầu giá."
+        ),
     ),
     "get_promotions": (
         PromotionArguments,
-        "Tra cứu khuyến mãi đang có hiệu lực theo ngày hỏi, model và kênh.",
+        (
+            "Dùng khi khách hỏi chương trình khuyến mãi nói chung hoặc điều kiện "
+            "không cần báo giá; trả chương trình đang hiệu lực theo ngày/model/kênh. "
+            "Nếu đang báo giá model, dùng quote_price thay vì gọi thêm công cụ này."
+        ),
     ),
     "get_warranty": (
         WarrantyArguments,
-        "Tra cứu thời hạn và điều kiện bảo hành theo model hoặc nhóm sản phẩm.",
-    ),
-    "get_region": (
-        RegionArguments,
-        "Tra cứu vùng giá tương ứng với tỉnh/thành.",
+        (
+            "Dùng để tra thời hạn, linh kiện và loại trừ bảo hành theo model/nhóm; "
+            "trả điều khoản có trích dẫn. Không gọi get_product_details chỉ để tìm "
+            "nhóm của một model."
+        ),
     ),
     "find_service_centres": (
         ServiceCentreArguments,
-        "Tìm trung tâm dịch vụ theo địa điểm và nhóm sản phẩm được tiếp nhận.",
+        (
+            "Dùng để tìm địa chỉ, điện thoại, giờ làm và năng lực trung tâm theo "
+            "tỉnh/quận/nhóm; kết quả chỉ gồm trung tâm khớp bộ lọc."
+        ),
     ),
     "get_service_fee": (
         ServiceFeeArguments,
-        "Tra cứu phí dịch vụ trong và ngoài bảo hành.",
+        (
+            "Dùng để tra phí dịch vụ trong/ngoài bảo hành theo mã, tên dịch vụ "
+            "hoặc nhóm sản phẩm; không suy ra phí từ trung tâm dịch vụ."
+        ),
     ),
     "search_policy": (
         PolicySearchArguments,
-        "Tìm điều khoản liên quan trong sổ tay chính sách; trả về trích dẫn.",
+        (
+            "Dùng để tìm chính sách, quy trình, đổi trả, lắp đặt hoặc hỗ trợ trong "
+            "sổ tay; trả toàn bộ mục cha có liên quan và cite_id. Không tự suy diễn "
+            "điều khoản ngoài nội dung trả về."
+        ),
     ),
     "calculate": (
         CalculateArguments,
-        "Tính biểu thức số học bằng số liệu đã lấy từ các công cụ khác.",
+        (
+            "Dùng để tính số học từ giá trị đã được nguồn/công cụ cung cấp; trả "
+            "kết quả Decimal chính xác. Không tự tính giảm giá hoặc tổng tiền."
+        ),
     ),
-    "get_date_context": (
-        DateContextArguments,
-        "Lấy ngày và thứ trong tuần của thời điểm câu hỏi.",
+    "add_days": (
+        AddDaysArguments,
+        (
+            "Dùng khi cần cộng/trừ số ngày lịch từ một ngày đã biết; trả ngày kết "
+            "quả và thứ trong tuần. Ngày hỏi hiện tại đã có trong hướng dẫn hệ thống."
+        ),
     ),
 }
 
@@ -693,16 +739,46 @@ def get_model_tool_definitions() -> list[ModelToolDefinition]:
     Returns:
         list[ModelToolDefinition]: Tool names, descriptions, and input schemas.
     """
-    return [
-        ModelToolDefinition(
-            function=FunctionDefinition(
-                name=name,
-                description=description,
-                parameters=arguments_model.model_json_schema(),
+    def clean_schema(value: object) -> object:
+        """Remove schema titles and the server-injected timestamp recursively."""
+        if isinstance(value, dict):
+            return {
+                key: clean_schema(item)
+                for key, item in value.items()
+                if key != "title"
+            }
+        if isinstance(value, list):
+            return [clean_schema(item) for item in value]
+        return value
+
+    definitions: list[ModelToolDefinition] = []
+    for name, (arguments_model, description) in TOOL_DESCRIPTIONS.items():
+        schema: dict[str, object] = arguments_model.model_json_schema()
+        properties: object = schema.get("properties")
+        if isinstance(properties, dict):
+            properties.pop("as_of", None)
+        required: object = schema.get("required")
+        if isinstance(required, list):
+            required_fields: list[object] = [
+                key for key in required if key != "as_of"
+            ]
+            if required_fields:
+                schema["required"] = required_fields
+            else:
+                schema.pop("required")
+        cleaned_schema: object = clean_schema(schema)
+        if not isinstance(cleaned_schema, dict):
+            raise TypeError("Tool argument schema must be a JSON object.")
+        definitions.append(
+            ModelToolDefinition(
+                function=FunctionDefinition(
+                    name=name,
+                    description=description,
+                    parameters=cleaned_schema,
+                )
             )
         )
-        for name, (arguments_model, description) in TOOL_DESCRIPTIONS.items()
-    ]
+    return definitions
 
 
 def _record_from_product(product: Product) -> ProductRecord:
@@ -728,21 +804,227 @@ def _record_from_product(product: Product) -> ProductRecord:
     )
 
 
-def _record_from_price(price: Price) -> PriceRecord:
-    """Convert a typed price row into a model-facing result record.
+def _promotion_applies_to_model(promotion: Promotion, model: str) -> bool:
+    """Return whether a promotion's include patterns contain a model.
 
     Args:
-        price: Effective price row with eagerly-loaded source provenance.
+        promotion: Promotion with parsed include/exclude patterns.
+        model: Exact product model code.
 
     Returns:
-        PriceRecord: Price, region, effective date, and citation.
+        ``True`` when included and not explicitly excluded.
     """
+    included: bool = any(
+        fnmatch.fnmatchcase(model, pattern)
+        for pattern in promotion.scope.get("include", [])
+    )
+    excluded: bool = any(
+        fnmatch.fnmatchcase(model, pattern)
+        for pattern in promotion.scope.get("exclude", [])
+    )
+    return included and not excluded
+
+
+def _discount_for_price(
+    promotion: Promotion,
+    price: Decimal,
+) -> Decimal | None:
+    """Calculate an individual cash or percentage discount with its cap.
+
+    Args:
+        promotion: Promotion with normalized amount, unit, and cap.
+        price: Listed price before this promotion.
+
+    Returns:
+        Discount rounded to whole currency units, or ``None`` for programs
+        that do not directly reduce price.
+    """
+    if promotion.promotion_type == "percentage_discount":
+        if promotion.value_amount is None:
+            return None
+        discount: Decimal = price * promotion.value_amount / Decimal(100)
+        if promotion.cap_amount is not None:
+            discount = min(discount, promotion.cap_amount)
+    elif promotion.promotion_type == "cash_discount":
+        if promotion.value_amount is None:
+            return None
+        discount = min(price, promotion.value_amount)
+    else:
+        return None
+    return discount.quantize(Decimal(1), rounding=ROUND_HALF_UP)
+
+
+def _quote_promotions(
+    promotions: list[Promotion],
+    model: str,
+    price: Decimal | None,
+    as_of: datetime,
+    channel: str | None,
+) -> tuple[
+    list[PricePromotionRecord],
+    list[NotApplicablePromotionRecord],
+    str | None,
+    list[str],
+]:
+    """Classify model promotions and calculate independent price reductions.
+
+    Args:
+        promotions: All dated promotion rows whose patterns mention the model.
+        model: Exact model code being quoted.
+        price: Listed price, if one was found.
+        as_of: Authoritative timestamp for the question.
+        channel: Customer's sales channel, if known.
+
+    Returns:
+        Applicable/conditional price reductions, inapplicable programs, and
+        installment eligibility terms.
+    """
+    applicable: list[PricePromotionRecord] = []
+    not_applicable: list[NotApplicablePromotionRecord] = []
+    installment_conditions: list[str] = []
+    installment_citations: list[str] = []
+    asked_date: date = as_of.date()
+    for promotion in promotions:
+        excluded_patterns: list[str] = [
+            pattern
+            for pattern in promotion.scope.get("exclude", [])
+            if fnmatch.fnmatchcase(model, pattern)
+        ]
+        if excluded_patterns:
+            reason: str = f"excluded: {', '.join(excluded_patterns)}"
+        elif not _promotion_applies_to_model(promotion, model):
+            continue
+        elif promotion.ends_on < asked_date:
+            reason = f"ended {promotion.ends_on.strftime('%d/%m/%Y')}"
+        elif promotion.starts_on > asked_date:
+            reason = f"starts {promotion.starts_on.strftime('%d/%m/%Y')}"
+        elif (
+            channel is not None
+            and promotion.channel not in (None, "Tất cả")
+            and promotion.channel.casefold() != channel.casefold()
+        ):
+            reason = f"channel limited to {promotion.channel}"
+        else:
+            if promotion.promotion_type == "installment":
+                condition: str = (
+                    promotion.conditions
+                    or promotion.value_details
+                    or promotion.name
+                )
+                if channel is None and promotion.channel not in (None, "Tất cả"):
+                    condition = f"{condition} (kênh {promotion.channel}, cần xác nhận)"
+                installment_conditions.append(condition)
+                installment_citations.append(promotion.cite_id)
+                continue
+            if promotion.promotion_type not in {
+                "percentage_discount",
+                "cash_discount",
+            }:
+                continue
+            discount: Decimal | None = (
+                _discount_for_price(promotion, price)
+                if price is not None
+                else None
+            )
+            if price is not None and discount is None:
+                continue
+            applicable.append(
+                PricePromotionRecord(
+                    code=promotion.code,
+                    name=promotion.name,
+                    channel=promotion.channel,
+                    discount_amount=discount,
+                    price_after_discount=(
+                        price - discount
+                        if price is not None and discount is not None
+                        else None
+                    ),
+                    conditions=promotion.conditions,
+                    stacking_text=promotion.stacking_text,
+                    channel_conditional=(
+                        channel is None
+                        and promotion.channel not in (None, "Tất cả")
+                    ),
+                    cite_id=promotion.cite_id,
+                )
+            )
+            continue
+        not_applicable.append(
+            NotApplicablePromotionRecord(
+                code=promotion.code,
+                name=promotion.name,
+                reason=reason,
+                cite_id=promotion.cite_id,
+            )
+        )
+    return (
+        applicable,
+        not_applicable,
+        "; ".join(dict.fromkeys(installment_conditions)) or None,
+        list(dict.fromkeys(installment_citations)),
+    )
+
+
+def _quote_price_record(
+    model: str,
+    price: Price | None,
+    product: Product | None,
+    region: str | None,
+    promotions: list[Promotion],
+    as_of: datetime,
+    channel: str | None,
+) -> PriceRecord:
+    """Build a quote record containing price, promotions, and catalog status.
+
+    Args:
+        model: Exact product model code.
+        price: Effective listed price, if available.
+        product: Catalog record, if the model exists.
+        region: Resolved price region, if available.
+        promotions: Programs whose include/exclude patterns mention the model.
+        as_of: Authoritative timestamp for the question.
+        channel: Customer sales channel, if known.
+
+    Returns:
+        Typed quote record, including explanations for price/promotion gaps.
+    """
+    listed_price: Decimal | None = price.price if price is not None else None
+    if price is None and product is None:
+        raise ValueError("A quote record requires a price or catalog product.")
+    (
+        applicable,
+        not_applicable,
+        installment_note,
+        installment_cite_ids,
+    ) = _quote_promotions(
+        promotions,
+        model,
+        listed_price,
+        as_of,
+        channel,
+    )
+    product_notes: str | None = product.notes if product is not None else None
+    cite_id: str = (
+        price.cite_id if price is not None else product.cite_id
+    )
     return PriceRecord(
-        model=price.model,
-        region=price.region,
-        price=price.price,
-        valid_from=price.valid_from,
-        cite_id=price.cite_id,
+        cite_id=cite_id,
+        model=model,
+        region=region,
+        price=listed_price,
+        valid_from=price.valid_from if price is not None else None,
+        product_status=product.status if product is not None else None,
+        product_notes=product_notes,
+        product_cite_id=product.cite_id if product is not None else None,
+        promotions=applicable,
+        not_applicable=not_applicable,
+        installment_note=installment_note,
+        installment_cite_ids=installment_cite_ids,
+        calculation_note=(
+            "Mỗi khuyến mãi được tính riêng trên giá niêm yết; chưa cộng dồn."
+            if applicable
+            else None
+        ),
     )
 
 
@@ -791,22 +1073,6 @@ def _record_from_warranty(warranty: Warranty) -> WarrantyRecord:
         component_months=warranty.component_months,
         exclusions=warranty.exclusions,
         cite_id=warranty.cite_id,
-    )
-
-
-def _record_from_region(region: Region) -> RegionRecord:
-    """Convert a province mapping row into a model-facing result record.
-
-    Args:
-        region: Region row with eagerly-loaded source provenance.
-
-    Returns:
-        RegionRecord: Province mapping and citation.
-    """
-    return RegionRecord(
-        province=region.province,
-        region=region.region,
-        cite_id=region.cite_id,
     )
 
 
@@ -928,92 +1194,163 @@ SourceEntity: TypeAlias = (
 )
 
 
-def _note_records(
-    source_file: str,
-    sheet_name: str,
-    notes: list[dict[str, object]],
-) -> list[WorksheetNoteRecord]:
-    """Convert persisted note rows into typed records with row citations.
+TOOL_SOURCE_TABLES: dict[str, set[str]] = {
+    "get_product_details": {"products"},
+    "quote_price": {"products", "prices", "regions", "promotions"},
+    "get_promotions": {"promotions"},
+    "get_warranty": {"products", "warranty"},
+    "find_service_centres": {"service_centres"},
+    "get_service_fee": {"service_fees"},
+}
+
+
+@lru_cache(maxsize=1)
+def _schema_mapping() -> SchemaMapping:
+    """Load the reviewed spreadsheet mapping once for tool-note lookup."""
+    return load_schema_mapping()
+
+
+def _sheet_notes(sheet: SourceSheet) -> list[tuple[str, str]]:
+    """Format non-title header and footer notes with row citations.
 
     Args:
-        source_file: Relative workbook path.
-        sheet_name: Original worksheet title.
-        notes: Raw note objects stored during workbook ingestion.
+        sheet: Persisted worksheet whose queried table is relevant.
 
     Returns:
-        list[WorksheetNoteRecord]: Notes retaining their workbook row numbers.
+        Note citation and compact ``[cite_id] text`` pairs.
+
+    Raises:
+        TypeError: If persisted note rows have an invalid shape.
     """
-    encoded_sheet: str = quote(sheet_name, safe="")
-    result: list[WorksheetNoteRecord] = []
-    for note in notes:
+    encoded_sheet: str = quote(sheet.name, safe="")
+    source_file: str = sheet.workbook.source_file
+    result: list[tuple[str, str]] = []
+    for note in [*(sheet.header_notes or []), *(sheet.footnotes or [])]:
         source_row: object = note.get("source_row")
         values: object = note.get("values")
         if not isinstance(source_row, int) or not isinstance(values, dict):
-            raise ValueError(
+            raise TypeError(
                 f"Invalid persisted worksheet note for {source_file} "
-                f"sheet {sheet_name!r}."
+                f"sheet {sheet.name!r}."
             )
-        result.append(
-            WorksheetNoteRecord(
-                source_row=source_row,
-                values=values,
-                cite_id=(
-                    f"{source_file}#sheet={encoded_sheet}&row={source_row}"
-                ),
-            )
+        text: str = " ".join(
+            str(value).strip()
+            for value in values.values()
+            if value is not None and str(value).strip()
         )
+        if not text:
+            continue
+        if len(values) == 1 and text.isupper() and any(
+            character.isalpha() for character in text
+        ):
+            continue
+        cite_id: str = (
+            f"{source_file}#sheet={encoded_sheet}&row={source_row}"
+        )
+        result.append((cite_id, f"[{cite_id}] {text}"))
     return result
 
 
-def _worksheet_contexts(
-    source_entities: list[SourceEntity],
-) -> list[WorksheetSourceContext]:
-    """Collect unique header and footer context for source worksheet rows.
+def _matching_sheet_tables(source_file: str) -> dict[str, str]:
+    """Map worksheet names to normalized tables for a workbook filename.
+
+    Args:
+        source_file: Ingested workbook path.
+
+    Returns:
+        Configured sheet name to table name pairs.
+
+    Raises:
+        ValueError: If the workbook filename matches multiple schema entries.
+    """
+    matches: list[WorkbookMapping] = [
+        workbook_mapping
+        for pattern, workbook_mapping in _schema_mapping().files.items()
+        if fnmatch.fnmatchcase(source_file.rsplit("/", 1)[-1], pattern)
+    ]
+    if len(matches) > 1:
+        raise ValueError(
+            f"Multiple schema mappings match workbook {source_file!r}."
+        )
+    if not matches:
+        return {}
+    workbook_mapping = matches[0]
+    return {
+        sheet_name: sheet_mapping.normalization.table
+        for sheet_name, sheet_mapping in workbook_mapping.sheets.items()
+        if not sheet_mapping.archive and sheet_mapping.normalization is not None
+    }
+
+
+async def _queried_worksheet_notes(
+    session: AsyncSession,
+    tool_name: str,
+) -> list[tuple[str, str]]:
+    """Fetch notes from every configured sheet queried by a tool.
+
+    Args:
+        session: Active asynchronous database session.
+        tool_name: Registered tool whose normalized source tables were queried.
+
+    Returns:
+        Compact note citation and text pairs, including for empty result sets.
+
+    Raises:
+        ValueError: If source note data or workbook mapping is invalid.
+        SQLAlchemyError: If PostgreSQL cannot execute the query.
+    """
+    tables: set[str] = TOOL_SOURCE_TABLES.get(tool_name, set())
+    if not tables:
+        return []
+    result = await session.scalars(
+        select(SourceSheet)
+        .join(SourceSheet.workbook)
+        .options(selectinload(SourceSheet.workbook))
+        .order_by(SourceSheet.workbook_id, SourceSheet.ordinal)
+    )
+    notes: list[tuple[str, str]] = []
+    for sheet in result.all():
+        mapped_tables: dict[str, str] = _matching_sheet_tables(
+            sheet.workbook.source_file
+        )
+        if mapped_tables.get(sheet.name) in tables:
+            notes.extend(_sheet_notes(sheet))
+    return notes
+
+
+def _entity_notes(source_entities: list[SourceEntity]) -> list[tuple[str, str]]:
+    """Collect note text from already-loaded row provenance.
 
     Args:
         source_entities: Normalized source rows with eager-loaded provenance.
 
     Returns:
-        list[WorksheetSourceContext]: One full worksheet context per source
-            sheet returned by the tool.
+        Unique compact note citation and text pairs.
     """
-    contexts: dict[int, WorksheetSourceContext] = {}
+    sheets: dict[int, SourceSheet] = {}
     for entity in source_entities:
         sheet: SourceSheet = entity.source_row.sheet
-        if sheet.id in contexts:
-            continue
-        source_file: str = sheet.workbook.source_file
-        encoded_sheet: str = quote(sheet.name, safe="")
-        contexts[sheet.id] = WorksheetSourceContext(
-            source_file=source_file,
-            sheet_name=sheet.name,
-            cite_id=f"{source_file}#sheet={encoded_sheet}",
-            columns=sheet.columns or [],
-            header_notes=_note_records(
-                source_file,
-                sheet.name,
-                sheet.header_notes or [],
-            ),
-            footnotes=_note_records(
-                source_file,
-                sheet.name,
-                sheet.footnotes or [],
-            ),
-        )
-    return list(contexts.values())
+        sheets.setdefault(sheet.id, sheet)
+    return [
+        note
+        for sheet in sheets.values()
+        for note in _sheet_notes(sheet)
+    ]
 
 
 def _make_result(
     name: str,
     records: list[ToolRecord],
     source_entities: list[SourceEntity] | None = None,
+    source_notes: list[tuple[str, str]] | None = None,
 ) -> ToolResult:
-    """Build a tool response with row and worksheet-context citations.
+    """Build a tool response with row citations and compact sheet notes.
 
     Args:
         name: Registered tool name.
         records: Typed result records.
         source_entities: Optional normalized rows used to resolve worksheets.
+        source_notes: Worksheet notes discovered from configured queried sheets.
 
     Returns:
         ToolResult: Records and citations limited to this invocation.
@@ -1024,21 +1361,30 @@ def _make_result(
             citation_values.extend(record.section_cite_ids)
         elif isinstance(record, CitedToolRecord):
             citation_values.append(record.cite_id)
-    source_contexts: list[WorksheetSourceContext] = _worksheet_contexts(
-        source_entities or []
-    )
-    for source_context in source_contexts:
-        citation_values.append(source_context.cite_id)
-        citation_values.extend(
-            note.cite_id
-            for note in [*source_context.header_notes, *source_context.footnotes]
-        )
+        if isinstance(record, PriceRecord):
+            if record.product_cite_id is not None:
+                citation_values.append(record.product_cite_id)
+            citation_values.extend(
+                promotion.cite_id for promotion in record.promotions
+            )
+            citation_values.extend(
+                promotion.cite_id for promotion in record.not_applicable
+            )
+            citation_values.extend(record.installment_cite_ids)
+    note_pairs: list[tuple[str, str]] = [
+        *(source_notes or []),
+        *_entity_notes(source_entities or []),
+    ]
+    unique_notes: dict[str, str] = {}
+    for cite_id, text in note_pairs:
+        unique_notes.setdefault(cite_id, text)
+        citation_values.append(cite_id)
     citations: list[str] = list(dict.fromkeys(citation_values))
     return ToolResult(
         tool_name=name,
         records=records,
         citations=citations,
-        source_contexts=source_contexts,
+        notes=list(unique_notes.values()),
     )
 
 
@@ -1070,6 +1416,15 @@ async def execute_model_tool(
     if registration is None:
         raise UnknownModelToolError(f"Unknown model tool: {name}")
     arguments_model: type[ToolArguments] = registration[0]
+    unknown_arguments: set[str] = set(arguments).difference(
+        arguments_model.model_fields
+    )
+    if unknown_arguments:
+        logger.info(
+            "Ignoring unknown arguments for tool %s: %s",
+            name,
+            sorted(unknown_arguments),
+        )
     parsed: ToolArguments = arguments_model.model_validate(arguments)
     as_of: datetime = parsed.as_of
     session: AsyncSession = context.session
@@ -1085,14 +1440,23 @@ async def execute_model_tool(
         source_entities = products
         records: list[ToolRecord] = [_record_from_product(item) for item in products]
     elif isinstance(parsed, QuotePriceArguments):
+        products: list[Product] = await get_products(
+            session,
+            as_of,
+            model=parsed.model,
+        )
+        product: Product | None = products[0] if products else None
         regions: list[str] = []
+        region_entities: list[Region] = []
         if parsed.province is not None:
-            mappings: list[Region] = await get_regions(
+            region_entities = await get_regions(
                 session,
                 as_of,
                 province=parsed.province,
             )
-            regions = list(dict.fromkeys(item.region for item in mappings))
+            regions = list(
+                dict.fromkeys(item.region for item in region_entities)
+            )
             if parsed.region is not None:
                 regions = [item for item in regions if item == parsed.region]
         elif parsed.region is not None:
@@ -1111,8 +1475,43 @@ async def execute_model_tool(
                     )
             else:
                 prices = await get_prices(session, as_of, model=parsed.model)
-        source_entities = prices
-        records = [_record_from_price(item) for item in prices]
+        promotions: list[Promotion] = await get_promotions_for_model(
+            session,
+            parsed.model,
+        )
+        source_entities = [
+            *products,
+            *prices,
+            *promotions,
+            *region_entities,
+        ]
+        if prices:
+            records = [
+                _quote_price_record(
+                    model=parsed.model,
+                    price=item,
+                    product=product,
+                    region=item.region,
+                    promotions=promotions,
+                    as_of=as_of,
+                    channel=parsed.channel,
+                )
+                for item in prices
+            ]
+        elif product is not None:
+            records = [
+                _quote_price_record(
+                    model=parsed.model,
+                    price=None,
+                    product=product,
+                    region=regions[0] if regions else None,
+                    promotions=promotions,
+                    as_of=as_of,
+                    channel=parsed.channel,
+                )
+            ]
+        else:
+            records = []
     elif isinstance(parsed, PromotionArguments):
         promotions: list[Promotion] = await get_promotions(
             session,
@@ -1143,10 +1542,6 @@ async def execute_model_tool(
             _record_from_warranty(item)
             for item in warranties
         ]
-    elif isinstance(parsed, RegionArguments):
-        mappings = await get_regions(session, as_of, province=parsed.province)
-        source_entities = mappings
-        records = [_record_from_region(item) for item in mappings]
     elif isinstance(parsed, ServiceCentreArguments):
         centres: list[ServiceCentre] = await find_service_centres(
             session,
@@ -1198,7 +1593,7 @@ async def execute_model_tool(
                 result=_calculate_expression(parsed.expression),
             )
         ]
-    elif isinstance(parsed, DateContextArguments):
+    elif isinstance(parsed, AddDaysArguments):
         weekday_names: tuple[str, ...] = (
             "Thứ Hai",
             "Thứ Ba",
@@ -1208,14 +1603,20 @@ async def execute_model_tool(
             "Thứ Bảy",
             "Chủ Nhật",
         )
+        result_date: date = parsed.start_date + timedelta(days=parsed.days)
         records = [
-            DateContextRecord(
-                as_of=as_of,
-                local_date=as_of.date().isoformat(),
-                weekday=weekday_names[as_of.weekday()],
+            AddDaysRecord(
+                start_date=parsed.start_date,
+                days=parsed.days,
+                result_date=result_date,
+                weekday=weekday_names[result_date.weekday()],
             )
         ]
     else:
         raise UnknownModelToolError(f"Tool arguments are not handled: {name}")
 
-    return _make_result(name, records, source_entities)
+    source_notes: list[tuple[str, str]] = await _queried_worksheet_notes(
+        session,
+        name,
+    )
+    return _make_result(name, records, source_entities, source_notes)

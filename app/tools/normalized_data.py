@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import unicodedata
 from datetime import date, datetime
 from typing import TypeAlias
 
@@ -18,7 +19,6 @@ from app.database import (
     ServiceCentre,
     ServiceFee,
     SourceSheet,
-    SourceWorkbook,
     SpreadsheetRow,
     Warranty,
 )
@@ -50,9 +50,76 @@ def _as_date(value: AsOf) -> date:
         value: Date or timestamp from the calling tool.
 
     Returns:
-        Calendar date in the timestamp's own timezone.
+        Calendar date from the Vietnam-local timestamp normalized at the API
+        boundary.
     """
     return value.date() if isinstance(value, datetime) else value
+
+
+def _normalize_group_text(value: str) -> str:
+    """Normalize accents and case for canonical product-group matching.
+
+    Args:
+        value: User-provided or source product-group text.
+
+    Returns:
+        Accent-free, case-folded text with normalized whitespace.
+    """
+    decomposed: str = unicodedata.normalize("NFD", value.casefold())
+    return " ".join(
+        "".join(
+            character
+            for character in decomposed
+            if unicodedata.category(character) != "Mn"
+        ).replace("đ", "d").split()
+    )
+
+
+async def resolve_product_group(
+    session: AsyncSession,
+    product_group: str,
+) -> str | None:
+    """Resolve user wording to a canonical product group.
+
+    Matching accepts accent/case differences and phrases containing a known
+    group, for example ``"máy nén điều hòa"`` resolves to ``"Điều hòa"``.
+
+    Args:
+        session: Active asynchronous database session.
+        product_group: User-supplied group name or descriptive phrase.
+
+    Returns:
+        Canonical product group, or ``None`` when no known group matches.
+
+    Raises:
+        SQLAlchemyError: If PostgreSQL cannot execute the query.
+    """
+    result = await session.scalars(select(Product.product_group).distinct())
+    groups: list[str] = sorted(
+        set(result.all()),
+        key=lambda group: _normalize_group_text(group),
+    )
+    normalized_query: str = _normalize_group_text(product_group)
+    exact_match: str | None = next(
+        (
+            group
+            for group in groups
+            if _normalize_group_text(group) == normalized_query
+        ),
+        None,
+    )
+    if exact_match is not None:
+        return exact_match
+    matching_groups: list[str] = [
+        group
+        for group in groups
+        if _normalize_group_text(group) in normalized_query
+    ]
+    return max(
+        matching_groups,
+        key=lambda group: len(_normalize_group_text(group)),
+        default=None,
+    )
 
 
 async def get_products(
@@ -82,7 +149,13 @@ async def get_products(
     if model is not None:
         statement = statement.where(Product.model == model)
     if product_group is not None:
-        statement = statement.where(Product.product_group == product_group)
+        resolved_group: str | None = await resolve_product_group(
+            session,
+            product_group,
+        )
+        if resolved_group is None:
+            return []
+        statement = statement.where(Product.product_group == resolved_group)
     result = await session.scalars(statement.order_by(Product.model))
     return list(result.all())
 
@@ -180,6 +253,43 @@ async def get_promotions(
     ]
 
 
+async def get_promotions_for_model(
+    session: AsyncSession,
+    model: str,
+) -> list[Promotion]:
+    """Return all dated promotions whose parsed scope mentions a model.
+
+    Unlike :func:`get_promotions`, this deliberately includes expired and
+    future programs so a price quote can explain why each one is inapplicable.
+
+    Args:
+        session: Active asynchronous database session.
+        model: Exact product model code.
+
+    Returns:
+        Promotions whose included or excluded patterns match the model.
+
+    Raises:
+        SQLAlchemyError: If PostgreSQL cannot execute the query.
+    """
+    result = await session.scalars(
+        select(Promotion)
+        .options(*_citation_load_options(Promotion))
+        .order_by(Promotion.starts_on, Promotion.code)
+    )
+    return [
+        promotion
+        for promotion in result.all()
+        if any(
+            fnmatch.fnmatchcase(model, pattern)
+            for pattern in [
+                *promotion.scope.get("include", []),
+                *promotion.scope.get("exclude", []),
+            ]
+        )
+    ]
+
+
 async def get_warranty(
     session: AsyncSession,
     as_of: AsOf,
@@ -203,7 +313,13 @@ async def get_warranty(
     """
     statement = select(Warranty).options(*_citation_load_options(Warranty))
     if product_group is not None:
-        statement = statement.where(Warranty.product_group == product_group)
+        resolved_group: str | None = await resolve_product_group(
+            session,
+            product_group,
+        )
+        if resolved_group is None:
+            return []
+        statement = statement.where(Warranty.product_group == resolved_group)
     result = await session.scalars(statement.order_by(Warranty.product_group))
     return list(result.all())
 
@@ -261,6 +377,11 @@ async def find_service_centres(
     Raises:
         SQLAlchemyError: If PostgreSQL cannot execute the query.
     """
+    resolved_group: str | None = None
+    if product_group is not None:
+        resolved_group = await resolve_product_group(session, product_group)
+        if resolved_group is None:
+            return []
     statement = select(ServiceCentre).options(
         *_citation_load_options(ServiceCentre)
     )
@@ -270,12 +391,12 @@ async def find_service_centres(
         statement = statement.where(ServiceCentre.district == district)
     result = await session.scalars(statement.order_by(ServiceCentre.code))
     centres: list[ServiceCentre] = list(result.all())
-    if product_group is None:
+    if resolved_group is None:
         return centres
     return [
         centre
         for centre in centres
-        if centre.accepted_services.get(product_group, False)
+        if centre.accepted_services.get(resolved_group, False)
     ]
 
 
@@ -304,6 +425,11 @@ async def get_service_fees(
     Raises:
         SQLAlchemyError: If PostgreSQL cannot execute the query.
     """
+    resolved_group: str | None = None
+    if product_group is not None:
+        resolved_group = await resolve_product_group(session, product_group)
+        if resolved_group is None:
+            return []
     statement = select(ServiceFee).options(*_citation_load_options(ServiceFee))
     if service_code is not None:
         statement = statement.where(ServiceFee.code == service_code)
@@ -318,10 +444,10 @@ async def get_service_fees(
         )
     result = await session.scalars(statement.order_by(ServiceFee.code))
     fees: list[ServiceFee] = list(result.all())
-    if product_group is None:
+    if resolved_group is None:
         return fees
     return [
         fee
         for fee in fees
-        if "Tất cả" in fee.applies_to or product_group in fee.applies_to
+        if "Tất cả" in fee.applies_to or resolved_group in fee.applies_to
     ]
