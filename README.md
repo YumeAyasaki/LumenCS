@@ -2,6 +2,21 @@
 
 ## API
 
+For a new checkout, create the local environment file before starting the
+services. If `.env` already exists, merge any missing settings from the example
+instead of overwriting local credentials:
+
+```sh
+cp -n .env.example .env
+```
+
+Set the provider key in `.env` (`GEMINI_KEY` by default, or
+`OPENAI_API_KEY` when using OpenAI). The file is gitignored; `.env.example`
+contains the shared application, database, model, image, and host-port
+configuration. Compose loads it for deployment settings, and the API loads it
+for local runs. Compose overrides only the database/vector-store hostnames and
+container data path so services can communicate on the Compose network.
+
 Run the API locally with:
 
 ```sh
@@ -36,10 +51,12 @@ OpenAPI documentation is available at `http://127.0.0.1:5000/docs`.
 ## Streamlit chat UI
 
 Start the API, databases, and Streamlit chat interface together with
-`docker compose up --build`. Open `http://127.0.0.1:8501` to chat; the UI
-connects to the API over the Compose network. Set `STREAMLIT_PORT` to change
-the host port. To run the interface locally, install the `ui` dependency group
-with `uv sync --group ui` and run
+`docker compose --env-file .env.example --env-file .env up --build`. The
+example provides defaults, while `.env` overrides them. Open
+`http://127.0.0.1:8501` to chat; the UI
+connects to the API over the Compose network. Change `STREAMLIT_PORT` in `.env`
+to change the host port. To run the interface locally, install the `ui`
+dependency group with `uv sync --group ui` and run
 `LUMEN_API_URL=http://127.0.0.1:5000 uv run --group ui streamlit run ui/streamlit_app.py`.
 The chat keeps its conversation in the Streamlit session, shows returned source
 citations, and sends the local current time as `asked_at`.
@@ -77,11 +94,10 @@ sources that were not returned by a tool.
 ## LLM providers
 
 The default provider is Gemini's OpenAI-compatible chat-completions endpoint
-using `gemini-3.5-flash-lite`.
-Put `GEMINI_KEY` in the local `.env` file (which is gitignored), then run the
-server normally. Set `LLM_PROVIDER=openai` and `OPENAI_API_KEY` to use OpenAI.
-For other compatible services, set `LLM_PROVIDER=openai-compatible`,
-`LLM_BASE_URL`, and `LLM_MODEL`; `LLM_API_KEY` is optional for local services.
+using `gemini-3.5-flash-lite`. Configure the provider and credentials in `.env`.
+Set `LLM_PROVIDER=openai` and `OPENAI_API_KEY` to use OpenAI. For other
+compatible services, set `LLM_PROVIDER=openai-compatible`, `LLM_BASE_URL`, and
+`LLM_MODEL`; `LLM_API_KEY` is optional for local services.
 Provider-reported input/output token counts and per-stage timings are logged
 without logging credentials or prompts. LLM provider dollar costs are not
 estimated.
@@ -90,14 +106,14 @@ transient timeouts up to three attempts. Set `LLM_READ_TIMEOUT_SECONDS` from
 1 to 600 to change that limit; the Streamlit client allows up to ten minutes
 for an answer. The same environment settings can be used with Docker Compose.
 
-`POST /ingest` processes the configured `DATA_DIR` in one request. It stores
-Excel workbook rows in PostgreSQL and embeds clause-level PDF chunks into a
-model-specific Qdrant collection. The response includes counts, PDF warnings,
-and per-stage/total latency. Repeated calls use stable point IDs and remove
-stale chunks. The API loads the multilingual embedding model during startup.
-The Docker image downloads and includes the default model weights at build
-time, avoiding a first-request download. Configure `DATA_DIR`,
-`QDRANT_COLLECTION`, and `PDF_EMBEDDING_MODEL` with environment variables.
+`POST /ingest` processes the configured `DATA_DIR` in one request. Set
+`DATA_DIR`, `QDRANT_COLLECTION`, and `PDF_EMBEDDING_MODEL` in `.env`. The
+service stores Excel workbook rows in PostgreSQL and embeds clause-level PDF
+chunks into a model-specific Qdrant collection. The response includes counts,
+PDF warnings, and per-stage/total latency. Repeated calls use stable point IDs
+and remove stale chunks. The API loads the multilingual embedding model during
+startup. The Docker image downloads and includes the configured model weights
+at build time, avoiding a first-request download.
 
 ## Spreadsheet reader
 
@@ -191,15 +207,19 @@ configured MiniLM model.
 Build and run the API alongside local Postgres and Qdrant:
 
 ```sh
-docker compose up --build
+docker compose --env-file .env.example --env-file .env up --build
 ```
 
 The app container applies Alembic migrations and starts the API at
 `http://127.0.0.1:5000`. Call `POST /ingest` to import the configured sources.
-PostgreSQL and Qdrant use persistent Docker volumes. If port 5000 is occupied,
-set `APP_PORT` to choose a different host port.
+PostgreSQL and Qdrant use persistent Docker volumes. Change `APP_PORT`,
+`POSTGRES_HOST_PORT`, `QDRANT_HTTP_PORT`, or `QDRANT_GRPC_PORT` in `.env` if a
+default host port is occupied. If you change `QDRANT_HTTP_PORT` for local API
+runs, update `QDRANT_URL` to match.
 
-To run only the databases, use `docker compose up -d postgres qdrant`. Their
-ports are bound to localhost (`5432`, `6333`, and `6334`). Postgres defaults
-are intended for local development and can be overridden with `POSTGRES_DB`,
-`POSTGRES_USER`, and `POSTGRES_PASSWORD` environment variables.
+To run only the databases, use
+`docker compose --env-file .env.example --env-file .env up -d postgres qdrant`.
+Their ports are bound to localhost (`POSTGRES_HOST_PORT`, `QDRANT_HTTP_PORT`,
+and `QDRANT_GRPC_PORT` from `.env`). The sample Postgres credentials are for
+local development; replace `POSTGRES_PASSWORD` before exposing services beyond
+your machine.

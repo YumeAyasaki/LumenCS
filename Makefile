@@ -15,7 +15,7 @@ test:
 	uv run python scripts/run_sample_questions.py
 
 up:
-	docker compose up --build
+	docker compose --env-file .env.example --env-file .env up --build
 
 down:
-	docker compose down
+	docker compose --env-file .env.example --env-file .env down

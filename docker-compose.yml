@@ -3,7 +3,10 @@ services:
     build:
       context: .
       args:
-        PDF_EMBEDDING_MODEL: ${PDF_EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+        PDF_EMBEDDING_MODEL: ${PDF_EMBEDDING_MODEL}
+    env_file:
+      - .env.example
+      - .env
     command:
       - sh
       - -c
@@ -11,22 +14,10 @@ services:
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
-      POSTGRES_DB: ${POSTGRES_DB:-lumen}
-      POSTGRES_USER: ${POSTGRES_USER:-lumen}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lumen-local-dev}
       QDRANT_URL: http://qdrant:6333
       DATA_DIR: /app/data
-      QDRANT_COLLECTION: ${QDRANT_COLLECTION:-policy_documents}
-      PDF_EMBEDDING_MODEL: ${PDF_EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
-      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
-      LLM_MODEL: ${LLM_MODEL:-gemini-3.5-flash-lite}
-      LLM_BASE_URL: ${LLM_BASE_URL:-}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_READ_TIMEOUT_SECONDS: ${LLM_READ_TIMEOUT_SECONDS:-180}
-      GEMINI_KEY: ${GEMINI_KEY:-}
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
-      - "127.0.0.1:${APP_PORT:-5000}:5000"
+      - "127.0.0.1:${APP_PORT}:5000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -41,20 +32,20 @@ services:
     environment:
       LUMEN_API_URL: http://app:5000
     ports:
-      - "127.0.0.1:${STREAMLIT_PORT:-8501}:8501"
+      - "127.0.0.1:${STREAMLIT_PORT}:8501"
     depends_on:
       app:
         condition: service_started
     restart: unless-stopped
 
   postgres:
-    image: postgres:16-alpine
+    image: ${POSTGRES_IMAGE}
     environment:
-      POSTGRES_DB: ${POSTGRES_DB:-lumen}
-      POSTGRES_USER: ${POSTGRES_USER:-lumen}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lumen-local-dev}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:${POSTGRES_HOST_PORT}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -64,10 +55,10 @@ services:
       retries: 5
 
   qdrant:
-    image: qdrant/qdrant:v1.15.3
+    image: ${QDRANT_IMAGE}
     ports:
-      - "127.0.0.1:6333:6333"
-      - "127.0.0.1:6334:6334"
+      - "127.0.0.1:${QDRANT_HTTP_PORT}:6333"
+      - "127.0.0.1:${QDRANT_GRPC_PORT}:6334"
     volumes:
       - qdrant_data:/qdrant/storage
 

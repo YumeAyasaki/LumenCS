@@ -10,14 +10,14 @@ WORKDIR /app
 COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev --no-install-project
 
-ARG PDF_EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+ARG PDF_EMBEDDING_MODEL
 ENV PDF_EMBEDDING_MODEL=${PDF_EMBEDDING_MODEL} \
     FASTEMBED_CACHE_PATH=/opt/fastembed_cache
 RUN uv run python -c "import os; from fastembed import TextEmbedding; TextEmbedding(model_name=os.environ['PDF_EMBEDDING_MODEL'], cache_dir=os.environ['FASTEMBED_CACHE_PATH'])"
 
 FROM python:3.11-slim AS runtime
 
-ARG PDF_EMBEDDING_MODEL=sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+ARG PDF_EMBEDDING_MODEL
 ENV PATH="/app/.venv/bin:$PATH" \
     PDF_EMBEDDING_MODEL=${PDF_EMBEDDING_MODEL} \
     FASTEMBED_CACHE_PATH=/opt/fastembed_cache \
