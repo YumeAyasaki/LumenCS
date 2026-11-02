@@ -8,11 +8,34 @@ from unittest.mock import patch
 
 import httpx
 
-from ui.streamlit_app import _stream_answer
+from ui.streamlit_app import _format_citation, _stream_answer
 
 
 class StreamlitChatTests(unittest.TestCase):
     """Verify SSE parsing and request construction for the chat interface."""
+
+    def test_formats_spreadsheet_citation_as_file_sheet_and_row(self) -> None:
+        """Decode worksheet names instead of showing URL-encoded IDs."""
+        self.assertEqual(
+            _format_citation(
+                "product_catalog.xlsx#sheet=B%E1%BA%A3ng%20gi%C3%A1&row=8"
+            ),
+            (
+                "**Tệp:** `product_catalog.xlsx` · "
+                "**Trang tính:** `Bảng giá` · **Dòng:** `8`"
+            ),
+        )
+
+    def test_formats_handbook_citations_as_section_or_page(self) -> None:
+        """Make PDF clause and page identifiers understandable at a glance."""
+        self.assertEqual(
+            _format_citation("policy_handbook.pdf#3.2"),
+            "**Tệp:** `policy_handbook.pdf` · **Mục:** `3.2`",
+        )
+        self.assertEqual(
+            _format_citation("policy_handbook.pdf#page=4"),
+            "**Tệp:** `policy_handbook.pdf` · **Trang:** `4`",
+        )
 
     def test_stream_answer_collects_text_citations_and_latency(self) -> None:
         """Parse API answer, citation, and completion events."""

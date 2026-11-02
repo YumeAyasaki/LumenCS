@@ -6,10 +6,10 @@ import json
 import os
 from datetime import datetime
 from typing import Any
+from urllib.parse import parse_qs
 
 import httpx
 import streamlit as st
-
 
 DEFAULT_API_URL: str = "http://127.0.0.1:5000"
 REQUEST_TIMEOUT: httpx.Timeout = httpx.Timeout(
@@ -129,8 +129,41 @@ def _stream_answer(
     )
 
 
+def _format_citation(citation: str) -> str:
+    """Format a source citation as readable file and location details.
+
+    Args:
+        citation: Stable source ID returned by a retrieval tool.
+
+    Returns:
+        Human-readable source file, sheet/row, handbook section, or page.
+    """
+    source_file, separator, fragment = citation.partition("#")
+    if not separator:
+        return f"**Tệp:** `{source_file}`"
+    if fragment.startswith("sheet="):
+        sheet_details: dict[str, list[str]] = parse_qs(fragment)
+        sheet: str | None = next(
+            iter(sheet_details.get("sheet", [])),
+            None,
+        )
+        row: str | None = next(iter(sheet_details.get("row", [])), None)
+        parts: list[str] = [f"**Tệp:** `{source_file}`"]
+        if sheet is not None:
+            parts.append(f"**Trang tính:** `{sheet}`")
+        if row is not None:
+            parts.append(f"**Dòng:** `{row}`")
+        return " · ".join(parts)
+    if fragment.startswith("page="):
+        page: str = fragment.removeprefix("page=")
+        return f"**Tệp:** `{source_file}` · **Trang:** `{page}`"
+    if fragment:
+        return f"**Tệp:** `{source_file}` · **Mục:** `{fragment}`"
+    return f"**Tệp:** `{source_file}`"
+
+
 def _render_citations(citations: list[str]) -> None:
-    """Display source identifiers returned with an assistant answer.
+    """Display readable source details for citations returned with an answer.
 
     Args:
         citations: Source IDs supporting the answer.
@@ -139,7 +172,7 @@ def _render_citations(citations: list[str]) -> None:
         return
     with st.expander("Nguồn tham khảo"):
         for citation in citations:
-            st.markdown(f"- `{citation}`")
+            st.markdown(f"- {_format_citation(citation)}")
 
 
 def _render_step_metrics(
