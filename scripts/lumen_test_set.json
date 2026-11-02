@@ -1,0 +1,293 @@
+[
+  {
+    "id": "T01",
+    "priority": "P1",
+    "asked_at": "2026-10-20T10:00:00+07:00",
+    "history": [],
+    "question": "LH-AC09N giá bao nhiêu ở Hà Nội?",
+    "reference_answer": "Hà Nội thuộc vùng Miền Bắc. Từ 01/09/2026 LH-AC09N có giá niêm yết 7.990.000 đ (dòng giá 01/01/2026 là 8.490.000 đ đã hết hiệu lực). Đến hết 31/10/2026 có KM-2610 giảm 10% (tối đa 2.000.000 đ) = 799.000 đ → còn 7.191.000 đ. Có thể kết hợp trả góp 0% 6 tháng (KM-TRAGOP) khi thanh toán bằng thẻ tín dụng ngân hàng đối tác (đơn từ 5.000.000 đ).",
+    "sources": "product_catalog › Vùng giá, Bảng giá (dòng 01/09/2026), Khuyến mãi (KM-2610, KM-TRAGOP)",
+    "type": "Giá + khuyến mãi",
+    "checks": "Chọn đúng dòng giá mới nhất không sau ngày hỏi (7.990.000, không phải 8.490.000); KM-2610 còn hiệu lực; tính 10% đúng."
+  },
+  {
+    "id": "T02",
+    "priority": "P1",
+    "asked_at": "2026-10-25T09:30:00+07:00",
+    "history": [],
+    "question": "Mua LH-AC24P ở Đà Nẵng hôm nay thì giá sau khuyến mãi là bao nhiêu?",
+    "reference_answer": "Đà Nẵng thuộc Miền Trung; từ 01/09/2026 LH-AC24P niêm yết 24.100.000 đ. KM-2610 giảm 10% = 2.410.000 đ nhưng bị giới hạn tối đa 2.000.000 đ → giá sau giảm 22.100.000 đ. Có thể kết hợp trả góp 0% 6 tháng (KM-TRAGOP) bằng thẻ tín dụng ngân hàng đối tác.",
+    "sources": "product_catalog › Vùng giá, Bảng giá (dòng 01/09/2026), Khuyến mãi (KM-2610 – mức tối đa, KM-TRAGOP)",
+    "type": "Giá + trần khuyến mãi",
+    "checks": "Áp dụng trần 2.000.000 đ (không phải 2.410.000); dùng giá Miền Trung dòng mới."
+  },
+  {
+    "id": "T03",
+    "priority": "P1",
+    "asked_at": "2026-10-31T23:30:00+07:00",
+    "history": [],
+    "question": "Mua LH-AC12N ở Hà Nội thì còn khuyến mãi không, giá bao nhiêu?",
+    "reference_answer": "Hôm nay là 31/10/2026 – ngày cuối của KM-2610 (tính cả ngày kết thúc, theo ngày đặt mua) nên vẫn áp dụng. LH-AC12N Miền Bắc niêm yết 10.990.000 đ, giảm 10% = 1.099.000 đ → 9.891.000 đ. Có thể kết hợp trả góp 0% 6 tháng (KM-TRAGOP) bằng thẻ tín dụng ngân hàng đối tác.",
+    "sources": "product_catalog › Vùng giá, Bảng giá, Khuyến mãi (KM-2610: 'gồm cả ngày bắt đầu và kết thúc')",
+    "type": "Ngày biên (bao gồm ngày cuối)",
+    "checks": "Ngày kết thúc được tính bao gồm; không được trả lời 'đã hết'."
+  },
+  {
+    "id": "T04",
+    "priority": "P1",
+    "asked_at": "2026-10-31T17:30:00Z",
+    "history": [],
+    "question": "Mua LH-AC12N ở Hà Nội thì còn khuyến mãi không, giá bao nhiêu?",
+    "reference_answer": "Thời điểm hỏi 17:30 UTC ngày 31/10 là 00:30 ngày 01/11/2026 giờ Việt Nam, KM-2610 đã kết thúc 31/10/2026 nên không còn áp dụng. LH-AC12N Miền Bắc niêm yết 10.990.000 đ. Hiện vẫn có trả góp 0% 6 tháng (KM-TRAGOP, đến 31/12/2026) bằng thẻ tín dụng ngân hàng đối tác.",
+    "sources": "product_catalog › Vùng giá, Bảng giá, Khuyến mãi (KM-2610 đã hết, KM-TRAGOP)",
+    "type": "Múi giờ",
+    "checks": "So sánh ngày theo giờ Việt Nam (Asia/Ho_Chi_Minh), không theo ngày UTC. Cặp với T03."
+  },
+  {
+    "id": "T05",
+    "priority": "P2",
+    "asked_at": "2026-11-02T09:00:00+07:00",
+    "history": [],
+    "question": "Tủ lạnh LH-RF620SBS ở TP.HCM giá bao nhiêu, đang có giảm gì không?",
+    "reference_answer": "TP.HCM thuộc Miền Nam: LH-RF620SBS niêm yết 27.290.000 đ. KM-RF (01/11–30/11/2026) giảm tiền mặt 3.000.000 đ → 24.290.000 đ. KM-RF ghi 'không cộng dồn' với CTKM khác, nên không kết hợp thêm trả góp 0% (KM-TRAGOP).",
+    "sources": "product_catalog › Vùng giá, Bảng giá, Khuyến mãi (KM-RF, KM-TRAGOP)",
+    "type": "Khuyến mãi mới bắt đầu + cộng dồn",
+    "checks": "KM-RF vừa bắt đầu 01/11. Lưu ý: cột 'cộng dồn' của KM-TRAGOP ghi 'Có' còn KM-RF ghi 'Không' – chấp nhận câu trả lời nêu rõ KM-RF không cộng dồn."
+  },
+  {
+    "id": "T06",
+    "priority": "P1",
+    "asked_at": "2026-10-14T11:00:00+07:00",
+    "history": [],
+    "question": "Máy giặt sấy LH-WD10H giá bao nhiêu ở Cần Thơ? Tôi có máy cũ muốn đổi.",
+    "reference_answer": "Cần Thơ thuộc Miền Nam. Ngày 14/10/2026 LH-WD10H niêm yết 18.890.000 đ (giá mới 17.890.000 đ chỉ hiệu lực từ 15/10/2026). KM-WMDOI (thu cũ đổi mới, 10/10–30/11/2026) giảm 1.500.000 đ nếu giao lại 1 máy giặt cũ khi nhận hàng → 17.390.000 đ. Có thể kết hợp trả góp 0% 6 tháng bằng thẻ tín dụng; KM-WMDOI chỉ cộng dồn với KM-TRAGOP.",
+    "sources": "product_catalog › Vùng giá, Bảng giá (dòng 01/01/2026 vì 15/10 chưa tới), Khuyến mãi (KM-WMDOI, KM-TRAGOP), Danh mục (WD thuộc nhóm Máy giặt)",
+    "type": "Giá theo thời điểm + thu cũ đổi mới",
+    "checks": "Không dùng giá 15/10; nhận ra LH-WD10H thuộc LH-WD*."
+  },
+  {
+    "id": "T07",
+    "priority": "P1",
+    "asked_at": "2026-10-28T10:00:00+07:00",
+    "history": [],
+    "question": "Máy lọc nước LH-WP10H giá bao nhiêu? Có trả góp 0% hay tặng lõi lọc không?",
+    "reference_answer": "LH-WP10H niêm yết 8.990.000 đ (như nhau ở cả 3 vùng). Hiện không có khuyến mãi áp dụng: KM-LOC (tặng lõi lọc, chỉ online) đã kết thúc 20/10/2026 và trả góp 0% KM-TRAGOP không áp dụng cho dòng LH-WP.",
+    "sources": "product_catalog › Bảng giá, Khuyến mãi (KM-LOC, KM-TRAGOP – 'trừ LH-WP*')",
+    "type": "Loại trừ khuyến mãi",
+    "checks": "Phải nêu cả hai: không trả góp và KM-LOC đã hết."
+  },
+  {
+    "id": "T08",
+    "priority": "P1",
+    "asked_at": "2026-10-28T15:00:00+07:00",
+    "history": [],
+    "question": "LH-AC09S giá bao nhiêu và còn bảo hành không?",
+    "reference_answer": "LH-AC09S đã ngừng kinh doanh từ 01/03/2026 nên không có giá bán hiện hành (bảng giá 2025 lưu trữ không dùng để báo giá). Sản phẩm vẫn được bảo hành theo chính sách hiện hành: 24 tháng toàn bộ máy, máy nén 120 tháng nếu kích hoạt bảo hành điện tử đúng hạn (mục 3.3). Model thay thế là LH-AC09N.",
+    "sources": "product_catalog › Danh mục SP (LH-AC09S), Bảo hành; policy_handbook 3.3",
+    "type": "Sản phẩm ngừng kinh doanh + sheet ẩn",
+    "checks": "TUYỆT ĐỐI không nêu 7.290.000/7.390.000/7.190.000 (sheet ẩn 2025). KM-2610 cũng loại trừ LH-AC09S."
+  },
+  {
+    "id": "T09",
+    "priority": "P2",
+    "asked_at": "2026-10-27T11:00:00+07:00",
+    "history": [],
+    "question": "Giá tủ lạnh LH-RF360 ở Huế là bao nhiêu?",
+    "reference_answer": "Huế không có trong danh sách phân vùng giá nên em chưa thể báo giá chính xác. Anh/chị vui lòng liên hệ hotline 1800 000 111 (miễn phí, 07:00–21:00) để được báo giá.",
+    "sources": "product_catalog › Vùng giá (ghi chú 'tỉnh/thành không có trong danh sách: liên hệ hotline'); policy_handbook 7",
+    "type": "Không có trong tài liệu",
+    "checks": "Không tự suy ra vùng giá cho Huế."
+  },
+  {
+    "id": "T10",
+    "priority": "P1",
+    "asked_at": "2026-10-20T14:00:00+07:00",
+    "history": [],
+    "question": "Tôi mua tủ lạnh LH-RF360 ngày 10/10/2026. Phải kích hoạt bảo hành điện tử trong bao lâu để được bảo hành máy nén 10 năm?",
+    "reference_answer": "Đơn mua từ 01/10/2026 được kích hoạt trong 45 ngày kể từ ngày mua (theo Sổ tay v3.2 mục 3.2; Sổ tay được ưu tiên hơn ghi chú 30 ngày trong bảng bảo hành) → hạn chót 24/11/2026. Kích hoạt đúng hạn: máy nén 120 tháng; không đúng hạn: 60 tháng. Toàn bộ tủ lạnh bảo hành 24 tháng.",
+    "sources": "policy_handbook 1.3, 3.2; product_catalog › Bảo hành (chú thích (*))",
+    "type": "Xung đột nguồn + tính ngày",
+    "checks": "Phải dùng 45 ngày, không phải 30; tính hạn 24/11/2026."
+  },
+  {
+    "id": "T11",
+    "priority": "P1",
+    "asked_at": "2026-10-05T09:00:00+07:00",
+    "history": [],
+    "question": "Tôi mua máy giặt LH-WM10F ngày 20/09/2026. Giờ còn kích hoạt bảo hành điện tử để có động cơ 10 năm được không?",
+    "reference_answer": "Đơn mua trước 01/10/2026 có thời hạn kích hoạt 30 ngày kể từ ngày mua → hạn chót 20/10/2026, nên hiện anh/chị vẫn còn thời gian (còn 15 ngày). Kích hoạt đúng hạn: động cơ Inverter bảo hành 120 tháng; không đúng hạn: 60 tháng.",
+    "sources": "policy_handbook 3.2 (hàng 'Trước 01/10/2026'); product_catalog › Bảo hành",
+    "type": "Quy tắc theo ngày mua",
+    "checks": "Quy tắc phụ thuộc NGÀY MUA, không phải ngày hỏi: 30 ngày ở đây."
+  },
+  {
+    "id": "T12",
+    "priority": "P2",
+    "asked_at": "2026-10-27T09:30:00+07:00",
+    "history": [],
+    "question": "Tiệm giặt của tôi vừa mua 3 máy giặt LH-WM12T, bảo hành bao lâu?",
+    "reference_answer": "Sử dụng cho mục đích thương mại (tiệm giặt) thì toàn bộ sản phẩm chỉ được bảo hành 6 tháng và không áp dụng thời hạn 120 tháng cho linh kiện chính (mục 3.4).",
+    "sources": "policy_handbook 3.4; product_catalog › Bảo hành",
+    "type": "Ngoại lệ chính sách",
+    "checks": "Không trả lời 24/120 tháng."
+  },
+  {
+    "id": "T13",
+    "priority": "P1",
+    "asked_at": "2026-10-27T10:30:00+07:00",
+    "history": [],
+    "question": "Tôi mua máy giặt LH-WM85F ở cửa hàng hôm qua, không thích nữa muốn trả lại thì được không?",
+    "reference_answer": "Không. Đổi trả do đổi ý chỉ áp dụng cho đơn mua online; sản phẩm mua tại cửa hàng không được áp dụng (mục 2.4). Nếu máy bị lỗi do nhà sản xuất trong 7 ngày đầu và được kỹ thuật viên Lumen Care xác nhận thì được đổi mới (mục 2.1).",
+    "sources": "policy_handbook 2.3, 2.4, 2.1",
+    "type": "Chính sách – từ chối",
+    "checks": "Không hứa hoàn tiền."
+  },
+  {
+    "id": "T14",
+    "priority": "P1",
+    "asked_at": "2026-11-04T10:00:00+07:00",
+    "history": [],
+    "question": "Tôi đặt online tủ lạnh LH-RF450S, hóa đơn 16.190.000 đ, nhận hàng ngày 28/10, chưa mở thùng, chưa lắp. Hôm nay muốn trả thì mất phí bao nhiêu?",
+    "reference_answer": "Nhận hàng 28/10 thì hạn chót đổi trả do đổi ý là 04/11/2026 (7 ngày kể từ ngày nhận) – hôm nay là ngày cuối nên vẫn được, miễn là còn nguyên seal và chưa lắp đặt. Phí xử lý 10% giá trị hóa đơn = 1.619.000 đ, hoàn lại 14.571.000 đ trong 5–7 ngày làm việc theo phương thức thanh toán ban đầu. (Nếu đơn mua trong chương trình thu cũ đổi mới thì không áp dụng.)",
+    "sources": "policy_handbook 2.3, 2.4",
+    "type": "Chính sách + tính ngày + tính tiền",
+    "checks": "Cách tính hạn nhất quán với mẫu S05 (nhận 22/10 → hạn 29/10). Cặp biên: nếu hỏi 05/11 thì đã quá hạn."
+  },
+  {
+    "id": "T15",
+    "priority": "P2",
+    "asked_at": "2026-10-29T16:00:00+07:00",
+    "history": [],
+    "question": "Máy giặt tôi nhận 3 ngày trước bị lỗi không quay được, có được đổi máy mới không?",
+    "reference_answer": "Lỗi do nhà sản xuất trong 7 ngày đầu kể từ ngày nhận hàng được đổi mới sản phẩm cùng model (hết hàng thì đổi model tương đương hoặc cao hơn, khách không bù chênh lệch), với điều kiện còn hóa đơn, đủ phụ kiện và lỗi được kỹ thuật viên Lumen Care xác nhận. Em không thể xác nhận đổi trước khi có kết quả kiểm tra kỹ thuật (mục 9.3).",
+    "sources": "policy_handbook 2.1, 9.3",
+    "type": "Chính sách có điều kiện",
+    "checks": "Không cam kết đổi ngay."
+  },
+  {
+    "id": "T16",
+    "priority": "P1",
+    "asked_at": "2026-10-30T16:00:00+07:00",
+    "history": [],
+    "question": "Chủ nhật này ở Hà Nội mang máy giặt đi bảo hành thì đến đâu mở cửa?",
+    "reference_answer": "Chỉ Lumen Care Cầu Giấy (HN01, 112 Trần Thái Tông, ĐT 024 7300 0101) nhận máy giặt và mở cửa Chủ nhật 08:00–12:00 (Thứ 2–Thứ 7 08:00–18:00). Hoàng Mai (HN02) nhận máy giặt nhưng nghỉ Chủ nhật; Long Biên (HN03) không nhận máy giặt.",
+    "sources": "service_network › Trung tâm dịch vụ (HN01, HN02, HN03)",
+    "type": "Tra cứu TTDV nhiều điều kiện",
+    "checks": "Lọc đồng thời: tỉnh + nhóm sản phẩm + Chủ nhật."
+  },
+  {
+    "id": "T17",
+    "priority": "P1",
+    "asked_at": "2026-10-28T14:00:00+07:00",
+    "history": [],
+    "question": "Điều hòa nhà tôi ở Nha Trang bị hỏng, mang đi bảo hành ở đâu?",
+    "reference_answer": "Lumen Care Nha Trang (KH01) đang tạm ngưng từ 20/10/2026 đến 05/11/2026 (cải tạo mặt bằng) và chuyển yêu cầu sang Lumen Care Cam Ranh (KH02): 9 Hùng Vương, TP. Cam Ranh, ĐT 0258 730 0602, Thứ 2–Thứ 7 08:00–17:00, Chủ nhật nghỉ; KH02 nhận điều hòa.",
+    "sources": "service_network › Trung tâm dịch vụ (KH01 – ghi chú tạm ngưng, KH02)",
+    "type": "Trạng thái trung tâm theo thời gian",
+    "checks": "Không giới thiệu KH01 như đang hoạt động. Biến thể khó: hỏi tủ lạnh ở Khánh Hòa cùng ngày – KH02 không nhận tủ lạnh, KH01 nhận nhưng tạm ngưng đến 05/11."
+  },
+  {
+    "id": "T18",
+    "priority": "P1",
+    "asked_at": "2026-10-27T15:20:00+07:00",
+    "history": [],
+    "question": "Lắp điều hòa 12.000 BTU mà cần 6 mét ống đồng, nhà cách trung tâm dịch vụ khoảng 20 km thì phải trả thêm bao nhiêu?",
+    "reference_answer": "Lắp đặt tiêu chuẩn đã gồm 3 m ống đồng nên phần vượt là 3 m × 220.000 đ/m (máy 9.000–12.000 BTU, DV08) = 660.000 đ. Địa chỉ cách TTDV 20 km (>15–30 km) thêm phụ phí di chuyển 100.000 đ (DV04). Tổng phụ thu: 760.000 đ.",
+    "sources": "service_network › Biểu phí dịch vụ (DV07, DV08, DV04); policy_handbook 5.1, 5.2",
+    "type": "Tính phí nhiều thành phần",
+    "checks": "Dùng đơn giá DV08 (không phải DV09 280.000); cộng đúng phụ phí di chuyển."
+  },
+  {
+    "id": "T19",
+    "priority": "P2",
+    "asked_at": "2026-10-28T14:00:00+07:00",
+    "history": [],
+    "question": "Kỹ thuật viên hẹn 9h sáng nhưng 12h mới đến mà không báo trước, tôi có được đền gì không?",
+    "reference_answer": "Kỹ thuật viên đến trễ quá 2 giờ so với khung hẹn mà không thông báo trước thì khách được tặng voucher dịch vụ 200.000 đ (một lần cho mỗi phiếu yêu cầu) theo mục 8.1.",
+    "sources": "policy_handbook 8.1",
+    "type": "Cam kết dịch vụ",
+    "checks": "Chính sách mới ở v3.2."
+  },
+  {
+    "id": "T20",
+    "priority": "P2",
+    "asked_at": "2026-10-28T09:00:00+07:00",
+    "history": [],
+    "question": "Máy giặt nhà tôi hỏng lần thứ hai rồi, tôi đòi bồi thường 5 triệu thì sao?",
+    "reference_answer": "Mức bồi thường 5 triệu nằm ngoài quy định trong Sổ tay nên em không thể cam kết (mục 1.4) và không xác nhận bồi thường trước khi có kết quả kiểm tra kỹ thuật (mục 9.3). Em sẽ ghi nhận khiếu nại, cấp mã phiếu và chuyển lên Trưởng nhóm CSKH khu vực; anh/chị sẽ được liên hệ lại trong 24 giờ (mục 9.1–9.2).",
+    "sources": "policy_handbook 1.4, 9.1, 9.2, 9.3",
+    "type": "Giới hạn – chuyển cấp",
+    "checks": "Không tự hứa tiền; nêu quy trình chuyển cấp."
+  },
+  {
+    "id": "T21",
+    "priority": "P2",
+    "asked_at": "2026-10-28T10:00:00+07:00",
+    "history": [],
+    "question": "Tủ lạnh LH-RF620SBS bên bạn còn hàng không?",
+    "reference_answer": "Em không có thông tin tồn kho trong tài liệu hiện có nên chưa thể xác nhận. Anh/chị vui lòng liên hệ hotline 1800 000 111 (07:00–21:00) hoặc cửa hàng để kiểm tra tồn kho.",
+    "sources": "policy_handbook 7 (kênh hỗ trợ)",
+    "type": "Không có trong tài liệu",
+    "checks": "Không bịa tình trạng hàng."
+  },
+  {
+    "id": "T22",
+    "priority": "P1",
+    "asked_at": "2026-10-27T08:16:00+07:00",
+    "history": [
+      {
+        "role": "user",
+        "content": "Gần tôi có trung tâm bảo hành nào không?"
+      },
+      {
+        "role": "assistant",
+        "content": "Anh/chị vui lòng cho biết tỉnh/thành và quận/huyện đang ở, cùng loại sản phẩm cần bảo hành, để em tìm trung tâm phù hợp nhất."
+      }
+    ],
+    "question": "Tôi ở Đà Nẵng, quận Hải Châu, cần bảo hành máy giặt.",
+    "reference_answer": "Gần nhất là Lumen Care Hải Châu (DN01): 120 Nguyễn Văn Linh, ĐT 0236 730 0501, nhận máy giặt, Thứ 2–Thứ 7 08:00–18:00, Chủ nhật 08:00–12:00. Ngoài ra Lumen Care Liên Chiểu (DN02, 55 Tôn Đức Thắng, ĐT 0236 730 0502, 08:00–17:30, nghỉ Chủ nhật) cũng nhận máy giặt.",
+    "sources": "service_network › Trung tâm dịch vụ (DN01, DN02)",
+    "type": "Đa lượt – trả lời câu hỏi lại",
+    "checks": "Phải dùng lịch sử: câu hỏi trước là 'Gần tôi có trung tâm bảo hành nào không?'."
+  },
+  {
+    "id": "T23",
+    "priority": "P1",
+    "asked_at": "2026-10-27T10:10:00+07:00",
+    "history": [
+      {
+        "role": "user",
+        "content": "Điều hòa LH-AC12N giá bao nhiêu ở Đà Nẵng?"
+      },
+      {
+        "role": "assistant",
+        "content": "LH-AC12N tại Đà Nẵng (vùng giá Miền Trung) có giá niêm yết 11.090.000 đ. Đến hết 31/10/2026 có KM-2610 giảm 10% (tối đa 2.000.000 đ) → còn 9.981.000 đ."
+      }
+    ],
+    "question": "Còn ở Hà Nội thì sao?",
+    "reference_answer": "Tại Hà Nội (Miền Bắc) LH-AC12N niêm yết 10.990.000 đ. Đến hết 31/10/2026 có KM-2610 giảm 10% = 1.099.000 đ → 9.891.000 đ, có thể kết hợp trả góp 0% 6 tháng (KM-TRAGOP) bằng thẻ tín dụng ngân hàng đối tác.",
+    "sources": "product_catalog › Vùng giá, Bảng giá, Khuyến mãi (KM-2610, KM-TRAGOP)",
+    "type": "Đa lượt – đại từ/ngữ cảnh",
+    "checks": "Phải suy ra model LH-AC12N và loại câu hỏi (giá) từ lịch sử; bước truy xuất handbook cũng phải dùng ngữ cảnh."
+  },
+  {
+    "id": "T24",
+    "priority": "P2",
+    "asked_at": "2026-10-27T11:35:00+07:00",
+    "history": [
+      {
+        "role": "user",
+        "content": "Tôi mua máy giặt trên web hôm 22/10, chưa mở thùng, giờ không muốn lấy nữa thì trả được không?"
+      },
+      {
+        "role": "assistant",
+        "content": "Được, nếu đơn online, trong 7 ngày kể từ ngày nhận hàng (hạn chót 29/10/2026), còn nguyên seal và chưa lắp đặt. Phí xử lý 10% giá trị hóa đơn."
+      }
+    ],
+    "question": "Vậy nếu tôi mua ở cửa hàng thì sao?",
+    "reference_answer": "Nếu mua tại cửa hàng thì không áp dụng đổi trả do đổi ý (mục 2.4); đổi trả do đổi ý chỉ dành cho đơn online. Chỉ khi máy lỗi do nhà sản xuất mới được đổi/sửa theo mục 2.1–2.2 hoặc bảo hành.",
+    "sources": "policy_handbook 2.3, 2.4, 2.1, 2.2",
+    "type": "Đa lượt – chính sách",
+    "checks": "Ngày 22/10 trong lịch sử không đổi asked_at."
+  }
+]

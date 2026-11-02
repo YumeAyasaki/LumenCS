@@ -5,9 +5,9 @@ data/*
 .env
 .env.*
 !.env.example
-scripts
-reports
-tests/test_sample_questions.py
+# scripts
+# reports
+# tests/test_sample_questions.py
 
 # Python things
 __pycache__/
