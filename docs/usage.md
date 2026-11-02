@@ -57,7 +57,10 @@ replace it before exposing services beyond the local machine.
 
 - `GET /health` checks PostgreSQL and Qdrant.
 - `POST /ask` answers a question using the given `asked_at` timestamp and
-  optional user/assistant history.
+  optional user/assistant history. Supply earlier turns in order to help the
+  assistant resolve follow-up references; history is context, not source
+  evidence, so factual claims must still be verified against tools in the
+  current request.
 - `POST /ingest` processes the configured `DATA_DIR`.
 - `GET /tools` lists available model-facing typed tools.
 - `POST /tools/{tool_name}` invokes a typed tool directly.

@@ -186,7 +186,13 @@ class ApiTests(unittest.TestCase):
                 {
                     "question": "Khi nào cần kích hoạt bảo hành?",
                     "asked_at": "2026-10-29T21:00:00Z",
-                    "history": [{"role": "user", "content": "Xin chào"}],
+                    "history": [
+                        {"role": "user", "content": "Tôi đang xem LH-AC09N."},
+                        {
+                            "role": "assistant",
+                            "content": "Anh/chị cần hỗ trợ gì về sản phẩm?",
+                        },
+                    ],
                 },
             )
 
@@ -228,7 +234,13 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(
             answer_question.await_args.kwargs["history"],
-            [{"role": "user", "content": "Xin chào"}],
+            [
+                {"role": "user", "content": "Tôi đang xem LH-AC09N."},
+                {
+                    "role": "assistant",
+                    "content": "Anh/chị cần hỗ trợ gì về sản phẩm?",
+                },
+            ],
         )
 
     def test_ask_reports_provider_configuration_failure(self) -> None:

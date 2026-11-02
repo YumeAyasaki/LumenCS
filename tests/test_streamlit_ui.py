@@ -76,7 +76,10 @@ class StreamlitChatTests(unittest.TestCase):
         ):
             answer, citations, latency_ms, metrics, executions = _stream_answer(
                 question="Xin chào",
-                history=[{"role": "assistant", "content": "Chào bạn"}],
+                history=[
+                    {"role": "user", "content": "Tôi đang xem máy lạnh."},
+                    {"role": "assistant", "content": "Chào anh/chị."},
+                ],
             )
 
         self.assertEqual(answer, "Xin chào bạn")
@@ -93,7 +96,10 @@ class StreamlitChatTests(unittest.TestCase):
         self.assertEqual(payload["question"], "Xin chào")
         self.assertEqual(
             payload["history"],
-            [{"role": "assistant", "content": "Chào bạn"}],
+            [
+                {"role": "user", "content": "Tôi đang xem máy lạnh."},
+                {"role": "assistant", "content": "Chào anh/chị."},
+            ],
         )
         self.assertIsNotNone(payload["asked_at"])
 

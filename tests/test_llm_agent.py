@@ -207,9 +207,15 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
             ) as execute_call,
         ):
             await answer_question(
-                question="Xin chào",
+                question="Còn bảo hành thì sao?",
                 asked_at="2026-10-31T23:30:00-04:00",
-                history=[],
+                history=[
+                    {"role": "user", "content": "Tôi đang xem máy lạnh LH-AC09N."},
+                    {
+                        "role": "assistant",
+                        "content": "Anh/chị muốn biết giá hay thông tin sản phẩm?",
+                    },
+                ],
                 session_factory=self.session_factory,
                 qdrant_client=self.qdrant_client,
                 embedding_model=self.embedding_model,
@@ -226,16 +232,28 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
             str(system_message["content"]),
         )
         self.assertIn("policy handbook", str(system_message["content"]).lower())
+        self.assertIn(
+            "Prior assistant answers are not evidence",
+            str(system_message["content"]),
+        )
         initial_messages: list[dict[str, object]] = (
             complete_request.await_args.args[1]
         )
         self.assertEqual(
             [message["role"] for message in initial_messages],
-            ["system", "system", "user"],
+            ["system", "system", "user", "assistant", "user"],
         )
         self.assertIn(
             "Automatic handbook search result",
             str(initial_messages[1]["content"]),
+        )
+        self.assertEqual(
+            [message["content"] for message in initial_messages[2:]],
+            [
+                "Tôi đang xem máy lạnh LH-AC09N.",
+                "Anh/chị muốn biết giá hay thông tin sản phẩm?",
+                "Còn bảo hành thì sao?",
+            ],
         )
         self.assertNotIn(
             "tool_calls",
@@ -245,7 +263,7 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
         initial_arguments: dict[str, object] = json.loads(
             execute_call.await_args.kwargs["call"].function.arguments
         )
-        self.assertEqual(initial_arguments["query"], "Xin chào")
+        self.assertEqual(initial_arguments["query"], "Còn bảo hành thì sao?")
         self.assertEqual(
             initial_arguments["as_of"],
             "2026-10-31T23:30:00-04:00",
