@@ -116,19 +116,6 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
         self.qdrant_client: MagicMock = MagicMock()
         self.embedding_model: MagicMock = MagicMock()
 
-    async def _successful_policy_search(
-        self,
-        call: ChatToolCall,
-        **_: object,
-    ) -> tuple[ChatToolCall, ToolResult, None, int]:
-        """Return a successful policy result for pre-search agent tests."""
-        result: ToolResult = ToolResult(
-            tool_name="search_policy",
-            records=[],
-            citations=["handbook.pdf#1"],
-        )
-        return call, result, None, 3
-
     def test_worksheet_notes_are_sent_once_per_request(self) -> None:
         """Remove duplicate note citations from subsequent tool results."""
         first_result: ToolResult = ToolResult(
@@ -171,8 +158,7 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_includes_vietnam_asked_date_in_system_prompt(self) -> None:
-        """Send the converted asked date to the model as prompt context."""
-        events: list[str] = []
+        """Send date and conversation history without an automatic tool call."""
         completion: ChatCompletion = ChatCompletion(
             choices=[
                 ChatChoice(
@@ -183,27 +169,14 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
         )
-        async def complete(*_: object, **__: object) -> ChatCompletion:
-            """Record the first provider call and return a final answer."""
-            events.append("llm")
-            return completion
-
-        async def execute_policy_search(
-            call: ChatToolCall,
-            **_: object,
-        ) -> tuple[ChatToolCall, ToolResult, None, int]:
-            """Record and return the initial policy search."""
-            events.append("policy")
-            return await self._successful_policy_search(call)
-
         with (
             patch(
                 "app.llm_agent._complete",
-                new=AsyncMock(side_effect=complete),
+                new=AsyncMock(return_value=completion),
             ) as complete_request,
             patch(
                 "app.llm_agent._execute_call",
-                new=AsyncMock(side_effect=execute_policy_search),
+                new=AsyncMock(),
             ) as execute_call,
         ):
             await answer_question(
@@ -231,7 +204,7 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
             "Asked date in Vietnam time: 01/11/2026 (dd/mm/yyyy)",
             str(system_message["content"]),
         )
-        self.assertIn("policy handbook", str(system_message["content"]).lower())
+        self.assertIn("policy search tool", str(system_message["content"]).lower())
         self.assertIn(
             "Prior assistant answers are not evidence",
             str(system_message["content"]),
@@ -241,34 +214,17 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             [message["role"] for message in initial_messages],
-            ["system", "system", "user", "assistant", "user"],
-        )
-        self.assertIn(
-            "Automatic handbook search result",
-            str(initial_messages[1]["content"]),
+            ["system", "user", "assistant", "user"],
         )
         self.assertEqual(
-            [message["content"] for message in initial_messages[2:]],
+            [message["content"] for message in initial_messages[1:]],
             [
                 "Tôi đang xem máy lạnh LH-AC09N.",
                 "Anh/chị muốn biết giá hay thông tin sản phẩm?",
                 "Còn bảo hành thì sao?",
             ],
         )
-        self.assertNotIn(
-            "tool_calls",
-            initial_messages[1],
-            "The internal policy lookup must not masquerade as a provider call.",
-        )
-        initial_arguments: dict[str, object] = json.loads(
-            execute_call.await_args.kwargs["call"].function.arguments
-        )
-        self.assertEqual(initial_arguments["query"], "Còn bảo hành thì sao?")
-        self.assertEqual(
-            initial_arguments["as_of"],
-            "2026-10-31T23:30:00-04:00",
-        )
-        self.assertEqual(events, ["policy", "llm"])
+        execute_call.assert_not_awaited()
 
     def test_provider_error_detail_is_actionable_and_redacted(self) -> None:
         """Extract a provider error message without exposing its API key."""
@@ -606,12 +562,31 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_retries_final_answer_with_unapproved_citation(self) -> None:
         """Retry once and return only citations received from a tool."""
+        policy_search_call: ChatToolCall = ChatToolCall(
+            id="policy-search-1",
+            type="function",
+            function=ChatFunction(
+                name="search_policy",
+                arguments='{"query":"điều kiện bảo hành"}',
+            ),
+        )
         tool_result: ToolResult = ToolResult(
             tool_name="search_policy",
             records=[],
             citations=["handbook.pdf#3.2"],
         )
         completions: list[ChatCompletion] = [
+            ChatCompletion(
+                choices=[
+                    ChatChoice(
+                        message=ChatMessage(
+                            role="assistant",
+                            tool_calls=[policy_search_call],
+                        )
+                    )
+                ],
+                usage=TokenUsage(prompt_tokens=10, completion_tokens=3),
+            ),
             ChatCompletion(
                 choices=[
                     ChatChoice(
@@ -671,13 +646,13 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.answer, "Chính sách bảo hành.")
         self.assertEqual(result.citations, ["handbook.pdf#3.2"])
         self.assertEqual(result.tool_calls, 1)
-        self.assertEqual(result.prompt_tokens, 26)
-        self.assertEqual(result.completion_tokens, 10)
-        self.assertEqual(complete.await_count, 2)
+        self.assertEqual(result.prompt_tokens, 36)
+        self.assertEqual(result.completion_tokens, 13)
+        self.assertEqual(complete.await_count, 3)
         self.assertEqual(len(result.tool_executions), 1)
         self.assertEqual(
             result.tool_executions[0].call_id,
-            "initial-policy-search",
+            "policy-search-1",
         )
         self.assertEqual(
             result.tool_executions[0].call.name,
@@ -694,18 +669,20 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [(metric.kind, metric.name) for metric in result.steps],
             [
-                ("tool", "initial_policy_search"),
+                ("llm", "tool_selection"),
+                ("tool", "search_policy"),
                 ("llm", "answer"),
                 ("llm", "citation_validation_retry"),
             ],
         )
         self.assertEqual(result.steps[0].step, 1)
-        self.assertEqual(result.steps[1].step, 2)
-        self.assertEqual(result.steps[1].prompt_tokens, 12)
-        self.assertEqual(result.steps[1].completion_tokens, 5)
+        self.assertEqual(result.steps[1].step, 1)
         self.assertEqual(result.steps[2].step, 2)
-        self.assertEqual(result.steps[2].prompt_tokens, 14)
+        self.assertEqual(result.steps[2].prompt_tokens, 12)
         self.assertEqual(result.steps[2].completion_tokens, 5)
+        self.assertEqual(result.steps[3].step, 2)
+        self.assertEqual(result.steps[3].prompt_tokens, 14)
+        self.assertEqual(result.steps[3].completion_tokens, 5)
         self.assertEqual(execute_call.await_count, 1)
 
     async def test_preserves_provider_tool_signature_for_followup_request(self) -> None:

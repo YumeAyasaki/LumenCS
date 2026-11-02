@@ -89,9 +89,10 @@ server supplies the request date as `as_of`; the model cannot issue SQL.
 applicable promotion and installment information when supported by the source
 data.
 
-The agent searches the policy handbook with the original question before tool
-selection. It validates final citations against IDs returned during the
-request and retries an invalid answer once. Spreadsheet citations resolve to
+The agent can request a focused handbook search when policy information is
+relevant; no handbook lookup runs automatically before tool selection. It
+validates final citations against IDs returned during the request and retries
+an invalid answer once. Spreadsheet citations resolve to
 source file, sheet, and Excel row; policy citations identify handbook clauses.
 
 ## Source ingestion

@@ -11,6 +11,12 @@ The system separates structured facts from handbook prose:
 - **The agent** calls a configured OpenAI-compatible chat-completions provider. It receives registered typed tools, not database access or free-form SQL.
 - **Docker Compose** runs the API, Streamlit, PostgreSQL, and Qdrant. Alembic migrations run when the API container starts.
 
+This split follows the shape of the source material. Spreadsheet rows are treated
+as structured facts that need exact filtering, joins, and traceable provenance,
+so they are normalized and queried in PostgreSQL. Handbook policies express
+meaning in natural language; semantic similarity is a better retrieval fit for
+those clauses, so they are indexed in Qdrant and searched on demand.
+
 ## Processing the materials
 
 Spreadsheet ingestion reads configured Excel files and preserves the original workbook/sheet structure, headers, notes, footnotes, visibility, cell values, and Excel row numbers. [The schema mapping](../app/schema_mapping.json) specifies sheet layouts, field mappings, and parsers. The normalizer converts mapped rows into typed records; parse or mapping problems are reported as warnings rather than silently turned into facts. Raw rows remain available for auditing and re-normalization.
@@ -21,7 +27,11 @@ PDF ingestion extracts page text and tables with PyMuPDF, then groups content in
 
 ## How the agent decides what to do
 
-The API normalizes `asked_at` to Vietnam time. Before asking the LLM to choose tools, the agent searches the handbook using the original question. It then supplies the question, optional conversation history, date context, and that search result to the LLM.
+The API normalizes `asked_at` to Vietnam time and supplies the question,
+optional conversation history, and date context to the LLM. No handbook search
+runs automatically before tool selection; the model can request a focused
+`search_policy` call when relevant. History helps resolve follow-up references,
+but factual claims must still be verified with tools during the current request.
 
 The LLM may request registered tools such as `quote_price`, `get_warranty`, `find_service_centres`, `get_service_fee`, or a focused `search_policy`. Tool arguments are Pydantic-validated; the server supplies the request timestamp as `as_of`. Independent calls in a step run concurrently, each database-backed call using its own session. The agent maps results back to their originating calls and collects citations from successful results. Arithmetic uses `calculate`; date arithmetic uses `add_days`.
 
@@ -46,8 +56,8 @@ For latency, the embedding model is loaded at startup, PostgreSQL lookups use ty
 
 ## Next steps
 
-1. Align the agent loop with the intended three-step maximum and add tests that enforce the limit.
-2. Add OCR or an explicit ingestion gate for scanned PDFs; evaluate retrieval on a broader, representative Vietnamese question set.
+1. Re-evaluate handbook retrieval on representative Vietnamese questions. Measure whether focused on-demand search and query construction using conversation context find the right clauses; avoid reintroducing a forced search on every request unless evaluation shows a clear accuracy benefit.
+2. Align the agent loop with the intended three-step maximum and add tests that enforce the limit.
 3. Improve mapping review and ingestion reporting for new workbook versions, including clearer summaries of rows excluded from normalization.
-4. Add request-level cost estimation where provider pricing and token data are available, and monitor latency and retrieval quality in production.
+4. Add request-level cost estimation where provider pricing and token data are available, and monitor retrieval quality in production.
 5. Define source-precedence and effective-date policies for conflicting or undated materials, then test those policies with realistic edge cases.
