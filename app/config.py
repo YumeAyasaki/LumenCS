@@ -10,7 +10,6 @@ from dotenv import load_dotenv
 from pydantic import BaseModel, Field, SecretStr
 from sqlalchemy.engine import URL
 
-
 LLMProvider: TypeAlias = Literal[
     "gemini",
     "openai",
@@ -31,6 +30,8 @@ class Settings(BaseModel):
         llm_model: Provider model identifier.
         llm_base_url: OpenAI-compatible API base URL.
         llm_api_key: Optional secret API credential.
+        gemini_backup_api_key: Optional backup Gemini API credential used when
+            the primary Gemini key is rate limited.
         llm_read_timeout_seconds: Maximum wait for provider response data.
 
     Raises:
@@ -48,6 +49,7 @@ class Settings(BaseModel):
     llm_model: str = "gemini-3.5-flash-lite"
     llm_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai"
     llm_api_key: SecretStr | None = None
+    gemini_backup_api_key: SecretStr | None = None
     llm_read_timeout_seconds: float = Field(default=180.0, gt=0, le=600)
 
     @classmethod
@@ -88,16 +90,19 @@ class Settings(BaseModel):
             )
             default_llm_model: str = "gemini-3.5-flash-lite"
             provider_key: str | None = os.getenv("GEMINI_KEY")
+            backup_provider_key: str | None = os.getenv("GEMINI_KEY_BACKUP")
         elif llm_provider_value == "openai":
             llm_provider = "openai"
             default_llm_base_url = "https://api.openai.com/v1"
             default_llm_model = "gpt-4o-mini"
             provider_key = os.getenv("OPENAI_API_KEY")
+            backup_provider_key = None
         else:
             llm_provider = "openai-compatible"
             default_llm_base_url = ""
             default_llm_model = ""
             provider_key = None
+            backup_provider_key = None
         return cls(
             database_url=database_url,
             qdrant_url=qdrant_url,
@@ -118,6 +123,11 @@ class Settings(BaseModel):
             llm_api_key=(
                 SecretStr(os.getenv("LLM_API_KEY") or provider_key or "")
                 if (os.getenv("LLM_API_KEY") or provider_key or "").strip()
+                else None
+            ),
+            gemini_backup_api_key=(
+                SecretStr(backup_provider_key)
+                if backup_provider_key and backup_provider_key.strip()
                 else None
             ),
             llm_read_timeout_seconds=float(

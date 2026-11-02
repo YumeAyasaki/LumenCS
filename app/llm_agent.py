@@ -324,11 +324,15 @@ def _chat_url(settings: Settings) -> str:
     return f"{settings.llm_base_url.rstrip('/')}/chat/completions"
 
 
-def _request_headers(settings: Settings) -> dict[str, str]:
+def _request_headers(
+    settings: Settings,
+    api_key: SecretStr | None = None,
+) -> dict[str, str]:
     """Create authorization headers without exposing credential values.
 
     Args:
         settings: Active LLM provider configuration.
+        api_key: Optional request-specific key, such as the Gemini backup key.
 
     Returns:
         dict[str, str]: JSON and optional bearer authorization headers.
@@ -337,14 +341,14 @@ def _request_headers(settings: Settings) -> dict[str, str]:
         LLMProviderError: If an authenticated provider has no API key.
     """
     headers: dict[str, str] = {"Content-Type": "application/json"}
-    api_key: SecretStr | None = settings.llm_api_key
-    if api_key is None:
+    active_api_key: SecretStr | None = api_key or settings.llm_api_key
+    if active_api_key is None:
         if settings.llm_provider != "openai-compatible":
             raise LLMConfigurationError(
                 f"No API key configured for provider {settings.llm_provider}."
             )
         return headers
-    headers["Authorization"] = f"Bearer {api_key.get_secret_value()}"
+    headers["Authorization"] = f"Bearer {active_api_key.get_secret_value()}"
     return headers
 
 
@@ -388,49 +392,77 @@ async def _complete(
             pool=15.0,
         )
         async with httpx.AsyncClient(timeout=timeout) as client:
-            for attempt in range(MAX_PROVIDER_ATTEMPTS):
+            attempt: int = 0
+            active_api_key: SecretStr | None = settings.llm_api_key
+            backup_key: SecretStr | None = settings.gemini_backup_api_key
+            backup_key_is_distinct: bool = (
+                backup_key is not None
+                and (
+                    active_api_key is None
+                    or backup_key.get_secret_value()
+                    != active_api_key.get_secret_value()
+                )
+            )
+            backup_key_used: bool = False
+            while attempt < MAX_PROVIDER_ATTEMPTS:
                 try:
                     response: httpx.Response = await client.post(
                         _chat_url(settings),
-                        headers=_request_headers(settings),
+                        headers=_request_headers(settings, active_api_key),
                         json=payload,
                     )
                     response.raise_for_status()
                     return ChatCompletion.model_validate(response.json())
                 except httpx.HTTPStatusError as error:
                     if (
+                        error.response.status_code == 429
+                        and settings.llm_provider == "gemini"
+                        and backup_key_is_distinct
+                        and not backup_key_used
+                        and backup_key is not None
+                    ):
+                        logger.warning(
+                            "Gemini primary key rate limited; retrying this "
+                            "request with GEMINI_KEY_BACKUP"
+                        )
+                        active_api_key = backup_key
+                        backup_key_used = True
+                        continue
+                    if (
                         error.response.status_code
                         not in (429, 500, 502, 503, 504)
-                        or attempt == MAX_PROVIDER_ATTEMPTS - 1
+                        or attempt >= MAX_PROVIDER_ATTEMPTS - 1
                     ):
                         raise
                     delay_seconds: float = _provider_retry_delay(
                         error.response,
                         attempt,
                     )
+                    attempt += 1
                     logger.warning(
                         "LLM provider %s returned HTTP %d; retrying attempt "
                         "%d/%d in %.1f seconds",
                         settings.llm_provider,
                         error.response.status_code,
-                        attempt + 2,
+                        attempt + 1,
                         MAX_PROVIDER_ATTEMPTS,
                         delay_seconds,
                     )
                     await asyncio.sleep(delay_seconds)
                 except (httpx.TimeoutException, httpx.NetworkError) as error:
-                    if attempt == MAX_PROVIDER_ATTEMPTS - 1:
+                    if attempt >= MAX_PROVIDER_ATTEMPTS - 1:
                         raise
                     delay_seconds = min(
                         0.5 * (2**attempt),
                         MAX_RETRY_DELAY_SECONDS,
                     )
+                    attempt += 1
                     logger.warning(
                         "LLM provider %s request failed with %s; retrying "
                         "attempt %d/%d in %.1f seconds",
                         settings.llm_provider,
                         type(error).__name__,
-                        attempt + 2,
+                        attempt + 1,
                         MAX_PROVIDER_ATTEMPTS,
                         delay_seconds,
                     )
@@ -520,9 +552,16 @@ def _provider_error_detail(
                 f"Provider returned HTTP {response.status_code} without "
                 "a diagnostic message."
             )
-    api_key: SecretStr | None = settings.llm_api_key
-    if api_key is not None:
-        secret_value: str = api_key.get_secret_value()
+    secret_values: list[SecretStr] = [
+        secret
+        for secret in (
+            settings.llm_api_key,
+            settings.gemini_backup_api_key,
+        )
+        if secret is not None
+    ]
+    for secret in secret_values:
+        secret_value: str = secret.get_secret_value()
         if secret_value:
             detail = detail.replace(secret_value, "[redacted]")
     return " ".join(detail.split())[:500]

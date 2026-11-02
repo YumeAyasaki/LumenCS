@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
+from pydantic import SecretStr
 
 from app.config import Settings
 from app.llm_agent import (
@@ -39,6 +40,7 @@ class LLMConfigurationTests(unittest.TestCase):
             "QDRANT_URL": "http://localhost:6333",
             "LLM_PROVIDER": "gemini",
             "GEMINI_KEY": "test-key",
+            "GEMINI_KEY_BACKUP": "test-backup-key",
         }
         with (
             patch.dict(os.environ, environment, clear=True),
@@ -56,6 +58,12 @@ class LLMConfigurationTests(unittest.TestCase):
         self.assertIsNotNone(settings.llm_api_key)
         assert settings.llm_api_key is not None
         self.assertEqual(settings.llm_api_key.get_secret_value(), "test-key")
+        self.assertIsNotNone(settings.gemini_backup_api_key)
+        assert settings.gemini_backup_api_key is not None
+        self.assertEqual(
+            settings.gemini_backup_api_key.get_secret_value(),
+            "test-backup-key",
+        )
 
     def test_selects_openai_defaults(self) -> None:
         """Resolve OpenAI model, URL, and provider-specific key."""
@@ -347,6 +355,107 @@ class LLMAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.choices[0].message.content, '{"answer":"Tôi có thể giúp.","citations":[]}')
         self.assertEqual(mock_client.post.await_count, 2)
         sleep.assert_awaited_once_with(0.5)
+
+    async def test_gemini_rate_limit_uses_backup_key_for_request(self) -> None:
+        """Retry a Gemini 429 immediately with the configured backup key."""
+        primary_key: SecretStr = SecretStr("primary-test-key")
+        backup_key: SecretStr = SecretStr("backup-test-key")
+        settings: Settings = Settings(
+            database_url="postgresql+asyncpg://localhost/lumen",
+            qdrant_url="http://localhost:6333",
+            llm_provider="gemini",
+            llm_model="gemini-test",
+            llm_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            llm_api_key=primary_key,
+            gemini_backup_api_key=backup_key,
+        )
+        rate_limited_response: httpx.Response = httpx.Response(
+            status_code=429,
+            request=httpx.Request(
+                "POST",
+                "https://generativelanguage.googleapis.com/v1beta/openai/"
+                "chat/completions",
+            ),
+            json={"error": {"message": "rate limit"}},
+        )
+        successful_response: httpx.Response = httpx.Response(
+            status_code=200,
+            request=httpx.Request(
+                "POST",
+                "https://generativelanguage.googleapis.com/v1beta/openai/"
+                "chat/completions",
+            ),
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                '{"answer":"Đã rõ.","citations":[]}'
+                            ),
+                        }
+                    }
+                ]
+            },
+        )
+        mock_client: MagicMock = MagicMock()
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=None)
+        mock_client.post = AsyncMock(
+            side_effect=[rate_limited_response, successful_response]
+        )
+
+        with (
+            patch("app.llm_agent.httpx.AsyncClient", return_value=mock_client),
+            patch("app.llm_agent.asyncio.sleep", new=AsyncMock()) as sleep,
+        ):
+            result = await _complete(
+                settings,
+                messages=[{"role": "user", "content": "Xin chào"}],
+                allow_tools=False,
+            )
+
+        self.assertEqual(
+            result.choices[0].message.content,
+            '{"answer":"Đã rõ.","citations":[]}',
+        )
+        self.assertEqual(mock_client.post.await_count, 2)
+        self.assertEqual(
+            mock_client.post.await_args_list[0].kwargs["headers"]["Authorization"],
+            "Bearer primary-test-key",
+        )
+        self.assertEqual(
+            mock_client.post.await_args_list[1].kwargs["headers"]["Authorization"],
+            "Bearer backup-test-key",
+        )
+        sleep.assert_not_awaited()
+
+    def test_rate_limit_error_redacts_both_gemini_keys(self) -> None:
+        """Never include either configured credential in provider diagnostics."""
+        settings: Settings = Settings(
+            database_url="postgresql+asyncpg://localhost/lumen",
+            qdrant_url="http://localhost:6333",
+            llm_provider="gemini",
+            llm_api_key=SecretStr("primary-test-key"),
+            gemini_backup_api_key=SecretStr("backup-test-key"),
+        )
+        response: httpx.Response = httpx.Response(
+            status_code=429,
+            json={
+                "error": {
+                    "message": (
+                        "primary-test-key was rate limited; "
+                        "backup-test-key is available"
+                    )
+                }
+            },
+        )
+
+        detail: str = _provider_error_detail(response, settings)
+
+        self.assertNotIn("primary-test-key", detail)
+        self.assertNotIn("backup-test-key", detail)
+        self.assertEqual(detail.count("[redacted]"), 2)
 
     async def test_missing_provider_usage_stays_unavailable(self) -> None:
         """Keep token fields absent when the provider omits usage data."""

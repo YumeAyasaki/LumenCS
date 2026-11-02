@@ -10,9 +10,14 @@ Compose reads `.env.example` first and `.env` second, so local values override
 the template.
 
 The default provider is Gemini (`gemini-3.5-flash-lite`); set `GEMINI_KEY` to
-authenticate. For OpenAI, set `LLM_PROVIDER=openai` and `OPENAI_API_KEY`. For
-another OpenAI-compatible provider, set `LLM_PROVIDER=openai-compatible`,
-`LLM_BASE_URL`, and `LLM_MODEL`; `LLM_API_KEY` is optional for local providers.
+authenticate. Optionally set `GEMINI_KEY_BACKUP` to a second Gemini API key.
+When Gemini returns HTTP 429 for the primary key, the current completion is
+retried immediately with the backup key; later completions still start with
+the primary key and fall back again if it is rate limited. The backup must
+have access to the configured model and API. For OpenAI, set
+`LLM_PROVIDER=openai` and `OPENAI_API_KEY`. For another OpenAI-compatible
+provider, set `LLM_PROVIDER=openai-compatible`, `LLM_BASE_URL`, and
+`LLM_MODEL`; `LLM_API_KEY` is optional for local providers.
 
 Change `APP_PORT`, `STREAMLIT_PORT`, `POSTGRES_HOST_PORT`, `QDRANT_HTTP_PORT`,
 or `QDRANT_GRPC_PORT` to adjust host ports. If changing the Qdrant HTTP port
