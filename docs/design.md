@@ -57,7 +57,6 @@ For latency, the embedding model is loaded at startup, PostgreSQL lookups use ty
 ## Next steps
 
 1. Re-evaluate handbook retrieval on representative Vietnamese questions. Measure whether focused on-demand search and query construction using conversation context find the right clauses; avoid reintroducing a forced search on every request unless evaluation shows a clear accuracy benefit.
-2. Align the agent loop with the intended three-step maximum and add tests that enforce the limit.
-3. Improve mapping review and ingestion reporting for new workbook versions, including clearer summaries of rows excluded from normalization.
-4. Add request-level cost estimation where provider pricing and token data are available, and monitor retrieval quality in production.
-5. Define source-precedence and effective-date policies for conflicting or undated materials, then test those policies with realistic edge cases.
+2. Improve mapping review and ingestion reporting for new workbook versions, including clearer summaries of rows excluded from normalization.
+3. Add request-level cost estimation where provider pricing and token data are available, and monitor retrieval quality in production.
+4. Define source-precedence and effective-date policies for conflicting or undated materials, then test those policies with realistic edge cases.

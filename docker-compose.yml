@@ -23,6 +23,16 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_started
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=5)
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 5m
     restart: unless-stopped
 
   streamlit:
@@ -35,7 +45,7 @@ services:
       - "127.0.0.1:${STREAMLIT_PORT}:8501"
     depends_on:
       app:
-        condition: service_started
+        condition: service_healthy
     restart: unless-stopped
 
   postgres:

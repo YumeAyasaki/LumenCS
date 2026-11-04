@@ -49,9 +49,10 @@ LUMEN_API_URL=http://127.0.0.1:5000 uv run --group ui streamlit run ui/streamlit
 
 Alternatively, run the full stack with
 `docker compose --env-file .env.example --env-file .env up --build`. Docker
-Compose applies migrations when starting the API. PostgreSQL and Qdrant use
-persistent volumes. The sample database password is for local development;
-replace it before exposing services beyond the local machine.
+Compose applies migrations when starting the API and waits for its health check
+before starting Streamlit. PostgreSQL and Qdrant use persistent volumes. The
+sample database password is for local development; replace it before exposing
+services beyond the local machine.
 
 ## API
 
